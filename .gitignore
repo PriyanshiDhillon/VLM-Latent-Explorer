@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+vlm_env/
+/env
+*.egg-info/
+
+# Large model/data files — don't commit these
+precomputed/*.pkl
+precomputed/*.npz
+precomputed/corpus_embeddings/
+data/subset/images/
+data/subset/metadata.json
+
+# Env
+.env
+
+# OS
+.DS_Store
