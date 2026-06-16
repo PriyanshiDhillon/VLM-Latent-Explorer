@@ -12,8 +12,7 @@ module purge
 module load 2025
 module load Anaconda3/2025.06-1
 
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate vlm-latent
+source activate vlm-latent
 
 cd $HOME/VLM-Latent-Explorer/experiment
 
