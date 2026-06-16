@@ -73,6 +73,18 @@ def parse_args():
         action="store_true",
         help="Recompute caches that already exist.",
     )
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        default=1,
+        help="Maximum number of images from each example to feed to the model.",
+    )
+    parser.add_argument(
+        "--max-pixels",
+        type=int,
+        default=512 * 512,
+        help="Per-image pixel budget passed to qwen-vl-utils.",
+    )
     return parser.parse_args()
 
 
@@ -135,16 +147,22 @@ def load_model(model_name):
     return processor, model
 
 
-def build_messages(example):
+def build_messages(example, max_images=1, max_pixels=512 * 512):
     content = []
     image_paths = example.get("image_paths") or [example.get("image_path")]
+    image_paths = [path for path in image_paths if path][:max_images]
+
     for image_path_str in image_paths:
         if not image_path_str:
             continue
         image_path = resolve_data_path(image_path_str)
         if not image_path.exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
-        content.append({"type": "image", "image": Image.open(image_path).convert("RGB")})
+        content.append({
+            "type": "image",
+            "image": Image.open(image_path).convert("RGB"),
+            "max_pixels": max_pixels,
+        })
 
     content.append({"type": "text", "text": example["question"]})
     return [{"role": "user", "content": content}]
@@ -256,8 +274,12 @@ def extract_generated_activations(generate_hidden_states, expected_steps, hidden
     return activations
 
 
-def run_example(model_name, processor, model, example, max_new_tokens):
-    messages = build_messages(example)
+def run_example(model_name, processor, model, example, args):
+    messages = build_messages(
+        example,
+        max_images=args.max_images,
+        max_pixels=args.max_pixels,
+    )
     inputs = make_inputs(processor, messages, model.device)
     prompt_len = int(inputs["input_ids"].shape[1])
 
@@ -281,7 +303,7 @@ def run_example(model_name, processor, model, example, max_new_tokens):
     with torch.no_grad():
         generated = model.generate(
             **inputs,
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=args.max_new_tokens,
             do_sample=False,
             output_hidden_states=True,
             return_dict_in_generate=True,
@@ -357,7 +379,7 @@ def run_model(model_name, examples, args):
             processor=processor,
             model=model,
             example=example,
-            max_new_tokens=args.max_new_tokens,
+            args=args,
         )
         saved_path = save_cache(model_name, example["id"], result)
         print(
