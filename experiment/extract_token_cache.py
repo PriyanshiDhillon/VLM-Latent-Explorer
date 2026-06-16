@@ -100,9 +100,16 @@ def load_model(model_name):
     if Qwen2_5_VLForConditionalGeneration is not None:
         model_classes.append(Qwen2_5_VLForConditionalGeneration)
 
-    from transformers import AutoModelForCausalLM, AutoModelForVision2Seq
+    try:
+        from transformers import AutoModelForVision2Seq
 
-    model_classes.extend([AutoModelForVision2Seq, AutoModelForCausalLM])
+        model_classes.append(AutoModelForVision2Seq)
+    except ImportError:
+        pass
+
+    from transformers import AutoModelForCausalLM
+
+    model_classes.append(AutoModelForCausalLM)
 
     last_error = None
     model = None
