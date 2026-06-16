@@ -14,9 +14,15 @@ precomputed/*.npz
 precomputed/corpus_embeddings/
 data/subset/images/
 data/subset/metadata.json
+model/Qwen2.5-VL-7B-Instruct/
+model/Monet-7B/
+model/LVR-7B/
 
 # Env
 .env
 
 # OS
 .DS_Store
+
+MMA_Intermediate_Report_J (2).pdf
+*.out
