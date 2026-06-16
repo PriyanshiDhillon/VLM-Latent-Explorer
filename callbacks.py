@@ -259,18 +259,20 @@ def register_callbacks(app):
         )
 
     @app.callback(
-        Output("heatmap-image",  "src"),
-        Output("umap-graph",     "figure"),
-        Output("param-display",  "children"),
-        Input("step-slider",           "value"),
-        Input("store-active-instance", "data"),
+        Output("heatmap-image",       "src"),
+        Output("umap-graph",          "figure"),
+        Output("param-display",       "children"),
+        Output("uncertainty-display", "children"),
+        Input("step-slider",            "value"),
+        Input("store-active-instance",  "data"),
+        Input("store-active-projection","data"),
         State("store-instances",        "data"),
         State("store-corpus-embeddings","data"),
         State("store-current-image-b64","data"),
         State("model-selector",         "value"),
         prevent_initial_call=True,
     )
-    def update_views(step, active_id, instances, corpus, img_b64, model_name):
+    def update_views(step, active_id, projection_mode, instances, corpus, img_b64, model_name):
         if not active_id or active_id not in instances:
             raise PreventUpdate
 
@@ -303,9 +305,13 @@ def register_callbacks(app):
             _stat_row("Type",       token_type),
             _stat_row("Model",      model_name),
             _stat_row("Instance",   active_id),
+            _stat_row("Projection", projection_mode or "umap"),
         ]
 
-        return heatmap_src, fig, param_children
+        # ── Uncertainty (neighbour-preservation per token) ────────────────
+        uncertainty_children = _build_uncertainty_display(result, step)
+
+        return heatmap_src, fig, param_children, uncertainty_children
 
     @app.callback(
         Output("tsne-graph",    "figure"),
@@ -400,29 +406,37 @@ def register_callbacks(app):
         return rows
     
 
+    # ── Projection toggle (UMAP ↔ t-SNE) ─────────────────────────────────
     @app.callback(
-        Output("kpi-model", "children"),
-        Output("kpi-step",  "children"),
-        Output("kpi-type",  "children"),
-        Output("kpi-inst",  "children"),
-        Input("model-selector",        "value"),
-        Input("step-slider",           "value"),
-        Input("store-active-instance", "data"),
-        Input("store-instances",       "data"),
+        Output("store-active-projection",   "data"),
+        Output("btn-umap",                  "color"),
+        Output("btn-umap",                  "outline"),
+        Output("btn-tsne",                  "color"),
+        Output("btn-tsne",                  "outline"),
+        Output("projection-panel-title",    "children"),
+        Output("projection-panel-subtitle", "children"),
+        Input("btn-umap",  "n_clicks"),
+        Input("btn-tsne",  "n_clicks"),
+        prevent_initial_call=True,
     )
-    def update_kpis(model_name, step, active_id, instances):
-        inst_count = len(instances) if instances else 0
-        token_type = "—"
-        if active_id and instances and active_id in instances:
-            types = instances[active_id].get("token_types", [])
-            if types and step < len(types):
-                token_type = types[step]
-        return (
-            model_name or "—",
-            str(step),
-            token_type,
-            str(inst_count),
-        )
+    def toggle_projection(n_umap, n_tsne):
+        triggered = ctx.triggered_id
+        if triggered == "btn-umap":
+            return (
+                "umap",
+                "primary", False,
+                "secondary", True,
+                "UMAP Projection",
+                "Token embedding space — draw a box to zoom into a region",
+            )
+        else:
+            return (
+                "tsne",
+                "secondary", True,
+                "primary", False,
+                "t-SNE Projection",
+                "Token embedding space — draw a box to zoom into a region",
+            )
 
 
 # ── UI helpers ───────────────────────────────────────────────────────────────
@@ -469,3 +483,51 @@ def _stat_row(label: str, value: str):
          html.Span(value,        className="stat-value")],
         className="stat-row",
     )
+
+def _build_uncertainty_display(result: dict, current_step: int):
+    """
+    Build a per-token uncertainty bar strip.
+
+    Uses 'trustworthiness_scores' if available in result (list[float], one per token),
+    otherwise shows a placeholder. Scores are in [0, 1]; higher = more trustworthy
+    (i.e. lower projection distortion / better neighbour preservation).
+    """
+    from dash import html
+
+    scores = result.get("trustworthiness_scores")   # list[float] | None
+    token_types = result.get("token_types", [])
+
+    if not scores:
+        return html.Div(
+            "Uncertainty scores not available for this run.",
+            className="stat-row",
+            style={"color": "#9ca3af", "fontStyle": "italic"},
+        )
+
+    items = []
+    for i, (score, ttype) in enumerate(zip(scores, token_types)):
+        color = TOKEN_COLORS.get(ttype, "#6b7280")
+        is_current = i == current_step
+        bar_width = f"{max(4, int(score * 100))}%"
+        items.append(
+            html.Div(
+                className=(
+                    "uncertainty-token uncertainty-token--active"
+                    if is_current else "uncertainty-token"
+                ),
+                title=f"Step {i} | {ttype} | trust={score:.2f}",
+                children=[
+                    html.Div(
+                        style={
+                            "width":        bar_width,
+                            "height":       "6px",
+                            "background":   color,
+                            "borderRadius": "3px",
+                            "opacity":      "1" if is_current else "0.55",
+                            "transition":   "width 0.2s",
+                        }
+                    )
+                ],
+            )
+        )
+    return html.Div(items, className="uncertainty-bar-strip")

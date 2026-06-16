@@ -24,8 +24,8 @@ _processor_cache: dict = {}
 
 MODEL_IDS = {
     "qwen":  "Qwen/Qwen2.5-VL-7B-Instruct",
-    "monet": "Qwen/Monet-7B",        # update to actual HF repo when available
-    "lvr":   "Qwen/LVR-7B",          # update to actual HF repo when available
+    "monet": "NOVAglow646/Monet-7B",        # update to actual HF repo when available
+    "lvr":   "vincentleebang/LVR-7B",          # update to actual HF repo when available
 }
 
 # Token type classification

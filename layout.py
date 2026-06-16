@@ -8,6 +8,24 @@ MODEL_OPTIONS = [
 ]
 
 
+# ── Top-level Reasoning Step slider bar ───────────────────────────────────────
+def step_slider_bar() -> html.Div:
+    return html.Div(
+        className="global-step-bar",
+        style={"marginBottom": "30px"},
+        children=[
+            html.Div("Reasoning Step", className="step-bar-label"),
+            dcc.Slider(
+                id="step-slider",
+                min=0, max=0, step=1, value=0,
+                marks={},
+                tooltip={"placement": "bottom", "always_visible": False},
+                className="center-slider global-step-slider",
+            ),
+        ],
+    )
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 def sidebar() -> html.Div:
     return html.Div(
@@ -15,8 +33,8 @@ def sidebar() -> html.Div:
         children=[
 
             html.Div([
-                html.Div("VLM Explorer",      className="sidebar-title"),
-                html.Div("Latent Reasoning",  className="sidebar-subtitle"),
+                html.Div("VLM Latent Token Explorer", className="sidebar-title"),
+                html.Div("Visual Latent Reasoning Analysis", className="sidebar-subtitle"),
             ]),
 
             html.Div("Model", className="sidebar-label"),
@@ -66,15 +84,6 @@ def sidebar() -> html.Div:
 
             html.Hr(className="sidebar-divider"),
 
-            html.Div("Reasoning Step", className="sidebar-label"),
-            dcc.Slider(
-                id="step-slider",
-                min=0, max=0, step=1, value=0,
-                marks={},
-                tooltip={"placement": "right", "always_visible": True},
-                className="sidebar-slider mb-2",
-            ),
-
             html.Div("Instances", className="sidebar-label"),
             html.Div(id="instance-list", className="instance-list mb-2"),
 
@@ -89,36 +98,16 @@ def sidebar() -> html.Div:
     )
 
 
-# ── KPI strip ─────────────────────────────────────────────────────────────────
-# def kpi_strip() -> dbc.Row:
-    # cards = [
-    #     ("Active Model",   "kpi-model", "kpi-card"),
-    #     ("Current Step",   "kpi-step",  "kpi-card dark"),
-    #     ("Token Type",     "kpi-type",  "kpi-card dark"),
-    #     ("Instances",      "kpi-inst",  "kpi-card"),
-    # ]
-    # cols = []
-    # for label, cid, cls in cards:
-    #     cols.append(dbc.Col(
-    #         html.Div(className=cls, children=[
-    #             html.Div(label,             className="kpi-card-label"),
-    #             html.Div("—", id=cid,      className="kpi-card-value"),
-    #         ]),
-    #         width=3,
-    #     ))
-    # return dbc.Row(cols, className="g-3 mb-3")
-
-
-# ── Row 1: Input | Heatmap | Parameters+Eval ─────────────────────────────────
+# ── Row 1: Heatmap | Parameters + Eval ───────────────────────────────────────
 def row_one() -> dbc.Row:
     return dbc.Row(className="g-3 mb-3", children=[
 
-        # ── HEATMAP (left, wider) ─────────────────────────────────────────
+        # ── HEATMAP ───────────────────────────────────────────────────────
         dbc.Col(width=6, children=[
             html.Div(className="content-card h-100", children=[
                 html.Div("Attention Heatmap",
                          className="content-card-title"),
-                html.Div("Cross-attention to image per step",
+                html.Div("Cross-attention overlay on image per reasoning step",
                          className="content-card-subtitle"),
                 html.Div(
                     html.Img(
@@ -131,12 +120,12 @@ def row_one() -> dbc.Row:
             ]),
         ]),
 
-        # ── PARAMETERS + EVALUATION (right) ──────────────────────────────
+        # ── PARAMETERS + EVALUATION ───────────────────────────────────────
         dbc.Col(width=3, children=[
             html.Div(className="content-card mb-3 h-100", children=[
-                html.Div("Parameters",
+                html.Div("Token Parameters",
                          className="content-card-title"),
-                html.Div("Current token info",
+                html.Div("Info for the token at the current step",
                          className="content-card-subtitle"),
                 html.Div(id="param-display", className="param-display"),
             ]),
@@ -157,15 +146,54 @@ def row_one() -> dbc.Row:
     ])
 
 
-# ── Row 2: UMAP | t-SNE + Stats ──────────────────────────────────────────────
+# ── Row 2: Projection (UMAP/t-SNE toggle) + Zoom ─────────────────────────────
 def row_two() -> dbc.Row:
-    return dbc.Row(className="g-3", children=[
+    return dbc.Row(className="g-3 mb-3", children=[
 
-        # ── UMAP (larger left) ────────────────────────────────────────────
-        dbc.Col(width=6, children=[
+        # ── MAIN PROJECTION PANEL (full width) ───────────────────────────
+        dbc.Col(width=12, children=[
             html.Div(className="content-card", children=[
-                html.Div("UMAP Projection",                     className="content-card-title"),
-                html.Div("Token embedding space — draw a box to select", className="content-card-subtitle"),
+
+                # ── Header row: title + projection toggle ─────────────────
+                html.Div(
+                    className="d-flex justify-content-between align-items-start mb-1",
+                    children=[
+                        html.Div([
+                            html.Div(
+                                id="projection-panel-title",
+                                children="UMAP Projection",
+                                className="content-card-title",
+                                style={"marginBottom": "2px"},
+                            ),
+                            html.Div(
+                                id="projection-panel-subtitle",
+                                children="Token embedding space — draw a box to zoom into a region",
+                                className="content-card-subtitle",
+                            ),
+                        ]),
+                        dbc.ButtonGroup([
+                            dbc.Button(
+                                "UMAP",
+                                id="btn-umap",
+                                color="primary",
+                                size="sm",
+                                className="proj-toggle-btn active",
+                                n_clicks=0,
+                            ),
+                            dbc.Button(
+                                "t-SNE",
+                                id="btn-tsne",
+                                color="secondary",
+                                outline=True,
+                                size="sm",
+                                className="proj-toggle-btn",
+                                n_clicks=0,
+                            ),
+                        ], className="proj-toggle-group"),
+                    ],
+                ),
+
+                # ── Main projection graph ─────────────────────────────────
                 dcc.Graph(
                     id="umap-graph",
                     config={
@@ -183,17 +211,45 @@ def row_two() -> dbc.Row:
                         },
                     },
                 ),
+
+                # ── Uncertainty strip ─────────────────────────────────────
+                html.Hr(className="card-divider"),
+                html.Div(
+                    className="d-flex align-items-center gap-2 mb-1",
+                    children=[
+                        html.Div("Projection Uncertainty", className="panel-label"),
+                        html.Span(
+                            "ⓘ",
+                            id="uncertainty-info-icon",
+                            className="uncertainty-info-icon",
+                            title=(
+                                "Neighbour-preservation score per token: "
+                                "high = trustworthy position, low = compressed/distorted region."
+                            ),
+                        ),
+                    ],
+                ),
+                html.Div(id="uncertainty-display", className="uncertainty-display"),
             ]),
         ]),
+    ])
 
-        # ── t-SNE + Statistics (right) ────────────────────────────────────
+
+# ── Row 3: Zoom / detail panel + Stats ───────────────────────────────────────
+def row_three() -> dbc.Row:
+    return dbc.Row(className="g-3", children=[
+
+        # ── ZOOM DETAIL (re-projection of selected box) ───────────────────
         dbc.Col(width=6, children=[
             html.Div(className="content-card", children=[
-                html.Div("t-SNE — Bounding Box Selection", className="content-card-title"),
-                html.Div("Re-projection of selected region", className="content-card-subtitle"),
+                html.Div("Zoom — Selected Region", className="content-card-title"),
+                html.Div(
+                    "Re-projection of the bounding-box selection above",
+                    className="content-card-subtitle",
+                ),
                 dcc.Graph(
                     id="tsne-graph",
-                    style={"height": "340px"},
+                    style={"height": "320px"},
                     figure={
                         "data": [],
                         "layout": {
@@ -203,8 +259,17 @@ def row_two() -> dbc.Row:
                         },
                     },
                 ),
-                html.Hr(className="card-divider"),
-                html.Div("Selection Statistics", className="panel-label"),
+            ]),
+        ]),
+
+        # ── SELECTION STATISTICS ──────────────────────────────────────────
+        dbc.Col(width=6, children=[
+            html.Div(className="content-card", children=[
+                html.Div("Selection Statistics", className="content-card-title"),
+                html.Div(
+                    "Aggregate metrics for the tokens in the selected region",
+                    className="content-card-subtitle",
+                ),
                 html.Div(id="stats-display", className="stats-display"),
             ]),
         ]),
@@ -222,16 +287,27 @@ def build_layout() -> html.Div:
             html.Div(
                 className="main-content",
                 children=[
-                    html.H4("Latent Reasoning Explorer", className="page-title"),
-                    # kpi_strip(),
+                    html.Div(
+                        className="page-header",
+                        children=[
+                            html.H4(
+                                "Visual Latent Token Reasoning Explorer",
+                                className="page-title",
+                            ),
+                            step_slider_bar(),
+                        ],
+                    ),
                     row_one(),
                     row_two(),
+                    row_three(),
                 ],
             ),
 
+            # ── Stores ───────────────────────────────────────────────────
             dcc.Store(id="store-instances",         data={}),
             dcc.Store(id="store-active-instance",   data=None),
             dcc.Store(id="store-corpus-embeddings", data={}),
             dcc.Store(id="store-current-image-b64", data=None),
+            dcc.Store(id="store-active-projection", data="umap"),
         ],
     )
