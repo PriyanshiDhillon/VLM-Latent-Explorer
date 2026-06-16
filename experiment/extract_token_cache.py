@@ -234,31 +234,73 @@ def extend_inputs_for_full_forward(inputs, full_input_ids):
     return full_inputs
 
 
+def extract_generated_activations(generate_hidden_states, expected_steps, hidden_size):
+    if not generate_hidden_states:
+        return np.empty((0, hidden_size), dtype=np.float16)
+
+    vectors = []
+    for step_hidden_states in generate_hidden_states:
+        if not step_hidden_states:
+            continue
+        last_layer = step_hidden_states[-1]
+        if last_layer.ndim != 3:
+            continue
+        vectors.append(last_layer[0, -1, :].detach().float().cpu().numpy())
+
+    if not vectors:
+        return np.empty((0, hidden_size), dtype=np.float16)
+
+    activations = np.stack(vectors).astype(np.float16)
+    if len(activations) > expected_steps:
+        activations = activations[:expected_steps]
+    return activations
+
+
 def run_example(model_name, processor, model, example, max_new_tokens):
     messages = build_messages(example)
     inputs = make_inputs(processor, messages, model.device)
     prompt_len = int(inputs["input_ids"].shape[1])
 
     with torch.no_grad():
-        generated = model.generate(
+        prompt_outputs = model(
             **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-        )
-
-    generated_ids = generated[:, prompt_len:]
-    full_input_ids = generated
-    full_inputs = extend_inputs_for_full_forward(inputs, full_input_ids)
-
-    with torch.no_grad():
-        outputs = model(
-            **full_inputs,
             output_hidden_states=True,
             return_dict=True,
             use_cache=False,
         )
 
-    activations = outputs.hidden_states[-1][0].detach().float().cpu().numpy().astype(np.float16)
+    prompt_activations = (
+        prompt_outputs.hidden_states[-1][0]
+        .detach()
+        .float()
+        .cpu()
+        .numpy()
+        .astype(np.float16)
+    )
+
+    with torch.no_grad():
+        generated = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            output_hidden_states=True,
+            return_dict_in_generate=True,
+        )
+
+    full_input_ids = generated.sequences
+    generated_ids = full_input_ids[:, prompt_len:]
+    generated_activations = extract_generated_activations(
+        generated.hidden_states,
+        expected_steps=int(generated_ids.shape[1]),
+        hidden_size=int(prompt_activations.shape[1]),
+    )
+
+    if len(generated_activations) < int(generated_ids.shape[1]):
+        missing = int(generated_ids.shape[1]) - len(generated_activations)
+        filler = np.full((missing, prompt_activations.shape[1]), np.nan, dtype=np.float16)
+        generated_activations = np.concatenate([generated_activations, filler], axis=0)
+
+    activations = np.concatenate([prompt_activations, generated_activations], axis=0)
     all_token_ids = full_input_ids[0].detach().cpu().tolist()
     generated_token_ids = generated_ids[0].detach().cpu().tolist()
     token_strings, token_types, token_sources = classify_tokens(
