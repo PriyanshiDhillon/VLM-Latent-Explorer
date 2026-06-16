@@ -41,9 +41,16 @@ def sidebar() -> html.Div:
             dbc.Select(
                 id="model-selector",
                 options=MODEL_OPTIONS,
-                value="qwen",
+                value=None,
+                placeholder="Select a model",
                 className="sidebar-select mb-2",
             ),
+            dcc.Loading(
+                type="circle",
+                children=html.Div(id="model-load-status",
+                                  style={"fontSize": "0.8rem", "color": "#9ca3af"}),
+            ),
+            dbc.Progress(id="model-load-progress", value=0, style={"display": "none"}, className="mb-2"),
 
             html.Div("Example", className="sidebar-label"),
             dbc.Select(
