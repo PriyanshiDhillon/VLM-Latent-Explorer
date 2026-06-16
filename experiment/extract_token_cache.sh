@@ -17,4 +17,5 @@ source activate vlm-latent
 cd $HOME/VLM-Latent-Explorer/experiment
 
 # Start small. After this succeeds, increase --limit or use --model all.
-python extract_token_cache.py --model qwen --limit 5 --max-new-tokens 128
+python extract_token_cache.py --model all --limit 50 --max-new-tokens 128
+
