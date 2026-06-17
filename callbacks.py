@@ -197,10 +197,11 @@ def register_callbacks(app):
         Output("model-load-status",   "children"),
         Output("model-load-progress", "value"),
         Output("model-load-progress", "style"),
-        Input("model-selector", "value"),
+        Input("load-model-btn", "n_clicks"),
+        State("model-selector", "value"),
         prevent_initial_call=True,
     )
-    def load_model_on_select(model_name):
+    def load_model_on_click(n_clicks, model_name):
         if not model_name:
             return "No model selected.", 0, {"display": "none"}
         current = inf.get_loaded_model()
@@ -336,7 +337,9 @@ def register_callbacks(app):
 
         if img_b64:
             image = _b64_to_pil(img_b64)
-            heatmap_src = hm.attn_to_heatmap_overlay(image, attn_at_step, grid_hw)
+            image_token_range = result.get("image_token_range")
+            heatmap_src = hm.attn_to_heatmap_overlay(image, attn_at_step, grid_hw,
+                                                      image_token_range=image_token_range)
         else:
             heatmap_src = ""
 

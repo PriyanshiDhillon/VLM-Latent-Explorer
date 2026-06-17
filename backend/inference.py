@@ -95,7 +95,7 @@ def _register_hooks(model, store: ActivationStore, target_layer: int = -1):
 
     def _attn_hook(module, input, output):
         if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
-            w = output[1][0, :, -1, :].detach().float().cpu().numpy()
+            w = output[1][0, :, -1, :].mean(0).detach().float().cpu().numpy() # testing average over heads
             store.attn_weights.append(w)
         else:
             store.attn_weights.append(None)
@@ -219,11 +219,24 @@ def run_inference(
     img_w, img_h = image.size
     image_grid_thw = inputs.get("image_grid_thw")
     if image_grid_thw is not None:
+        merge_size = getattr(processor.image_processor, "merge_size", 2)
         _, grid_h, grid_w = image_grid_thw[0].tolist()
+        grid_h //= merge_size
+        grid_w //= merge_size
     else:
-        grid_h = img_h // 14
-        grid_w = img_w // 14
+        grid_h = img_h // 28   # 14px patch × 2 merge
+        grid_w = img_w // 28
 
+    input_ids_list = inputs["input_ids"][0].tolist()
+    vision_start_id = processor.tokenizer.convert_tokens_to_ids("<|vision_start|>")
+    vision_end_id   = processor.tokenizer.convert_tokens_to_ids("<|vision_end|>")
+    try:
+        img_token_start = input_ids_list.index(vision_start_id) + 1
+        img_token_end   = input_ids_list.index(vision_end_id)
+    except ValueError:
+        img_token_start = 0
+        img_token_end   = grid_h * grid_w
+    print(f"[debug] tokens in range: {img_token_end - img_token_start}, grid_h*grid_w: {grid_h * grid_w}")
     store = ActivationStore()
     store._skip_next = True
     _register_hooks(model, store)
@@ -263,6 +276,7 @@ def run_inference(
         "token_ids":      all_ids,
         "generated_text": generated_text,
         "image_grid_hw":  (grid_h, grid_w),
+        "image_token_range": (img_token_start, img_token_end),
     }
 
 
