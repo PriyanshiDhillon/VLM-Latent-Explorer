@@ -25,4 +25,4 @@ model/LVR-7B/
 .DS_Store
 
 MMA_Intermediate_Report_J (2).pdf
-*.out
+*.outprecomputed/

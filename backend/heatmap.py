@@ -27,6 +27,7 @@ def attn_to_heatmap_overlay(
     attn_weights: np.ndarray | None,
     grid_hw: tuple[int, int],
     alpha: float = 0.5,
+    image_token_range: tuple[int, int] | None = None,
 ) -> str:
     """
     Convert cross-attention weights for one step into a heatmap overlaid on image.
@@ -37,7 +38,7 @@ def attn_to_heatmap_overlay(
     attn_weights : (num_heads, src_len) attention weights, or None
     grid_hw      : (grid_h, grid_w) spatial grid of image patches
     alpha        : blending weight for overlay (0=image only, 1=heatmap only)
-
+    image_token_range : (start, end) indices of image tokens in the input sequence
     Returns
     -------
     base64-encoded PNG string (for use in html.Img src)
@@ -51,13 +52,15 @@ def attn_to_heatmap_overlay(
     grid_h, grid_w = grid_hw
 
     num_img_tokens = grid_h * grid_w
-    mean_attn = attn_weights.mean(axis=0) 
 
-    if mean_attn.shape[0] >= num_img_tokens:
-        img_attn = mean_attn[-num_img_tokens - 1: -1] if mean_attn.shape[0] > num_img_tokens else mean_attn
-        img_attn = img_attn[:num_img_tokens]
+    # attn_weights may be (num_heads, kv_len) raw or (kv_len,) already head-averaged
+    mean_attn = attn_weights.mean(axis=0) if attn_weights.ndim == 2 else attn_weights
+
+    if image_token_range is not None:
+        start, end = image_token_range
+        img_attn = mean_attn[start:end]
     else:
-        img_attn = mean_attn
+        img_attn = mean_attn[:num_img_tokens]
 
     target_len = grid_h * grid_w
     if img_attn.shape[0] < target_len:

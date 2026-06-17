@@ -18,14 +18,13 @@ import torch
 from pathlib import Path
 from typing import Optional
 from PIL import Image
-
 _model_cache: dict = {}
 _processor_cache: dict = {}
 
 MODEL_IDS = {
-    "qwen":  "Qwen/Qwen2.5-VL-7B-Instruct",
-    "monet": "NOVAglow646/Monet-7B",        # update to actual HF repo when available
-    "lvr":   "vincentleebang/LVR-7B",          # update to actual HF repo when available
+    "qwen":  "/gpfs/scratch1/shared/kguanmma/Qwen2.5-VL-7B-Instruct",
+    "monet": "/gpfs/scratch1/shared/kguanmma/Monet-7B",
+    "lvr":   "/gpfs/scratch1/shared/kguanmma/LVR-7B",
 }
 
 # Token type classification
@@ -35,17 +34,18 @@ LATENT_TRIGGER_TOKEN = "<|latent|>"   # adjust to whatever Monet/LVR actually us
 def _get_model_and_processor(model_name: str):
     """Load (and cache) a model + processor by name."""
     if model_name not in _model_cache:
-        from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 
         model_id = MODEL_IDS[model_name]
         print(f"[inference] Loading {model_id} ...")
 
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
             device_map="auto",
             trust_remote_code=True,
+            attn_implementation="eager",
         )
         model.eval()
         _model_cache[model_name] = model
@@ -83,16 +83,19 @@ def _register_hooks(model, store: ActivationStore, target_layer: int = -1):
     - Hidden state hook: captures the output of the target layer.
     - Attention hook: captures cross-attention (or self-attention) weights.
     """
-    layers = model.model.layers
+    layers = model.model.language_model.layers
     layer = layers[target_layer]
 
     def _hidden_hook(module, input, output):
-        hs = output[0][0, -1, :].detach().float().cpu().numpy()
+        if store._skip_next:
+            store._skip_next = False
+            return
+        hs = output[0][-1, :].detach().float().cpu().numpy()  # ← remove the [0, ] batch dim
         store.hidden_states.append(hs)
 
     def _attn_hook(module, input, output):
         if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
-            w = output[1][0, :, -1, :].detach().float().cpu().numpy()
+            w = output[1][0, :, -1, :].mean(0).detach().float().cpu().numpy() # testing average over heads
             store.attn_weights.append(w)
         else:
             store.attn_weights.append(None)
@@ -214,10 +217,28 @@ def run_inference(
     ).to(model.device)
 
     img_w, img_h = image.size
-    grid_h = img_h // 14
-    grid_w = img_w // 14
+    image_grid_thw = inputs.get("image_grid_thw")
+    if image_grid_thw is not None:
+        merge_size = getattr(processor.image_processor, "merge_size", 2)
+        _, grid_h, grid_w = image_grid_thw[0].tolist()
+        grid_h //= merge_size
+        grid_w //= merge_size
+    else:
+        grid_h = img_h // 28   # 14px patch × 2 merge
+        grid_w = img_w // 28
 
+    input_ids_list = inputs["input_ids"][0].tolist()
+    vision_start_id = processor.tokenizer.convert_tokens_to_ids("<|vision_start|>")
+    vision_end_id   = processor.tokenizer.convert_tokens_to_ids("<|vision_end|>")
+    try:
+        img_token_start = input_ids_list.index(vision_start_id) + 1
+        img_token_end   = input_ids_list.index(vision_end_id)
+    except ValueError:
+        img_token_start = 0
+        img_token_end   = grid_h * grid_w
+    print(f"[debug] tokens in range: {img_token_end - img_token_start}, grid_h*grid_w: {grid_h * grid_w}")
     store = ActivationStore()
+    store._skip_next = True
     _register_hooks(model, store)
 
     with torch.no_grad():
@@ -225,7 +246,7 @@ def run_inference(
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
-            output_attentions=False, 
+            output_attentions=True, 
         )
 
     store.remove_hooks()
@@ -255,6 +276,7 @@ def run_inference(
         "token_ids":      all_ids,
         "generated_text": generated_text,
         "image_grid_hw":  (grid_h, grid_w),
+        "image_token_range": (img_token_start, img_token_end),
     }
 
 
@@ -288,3 +310,21 @@ def run_edited_inference(
         prefix_activations=[np.array(a) for a in prefix_acts],
         prefix_attn=prefix_attn,
     )
+
+
+
+def unload_model(model_name: str):
+    """Unload a model from cache and free GPU memory."""
+    import gc
+    if model_name in _model_cache:
+        del _model_cache[model_name]
+        del _processor_cache[model_name]
+        torch.cuda.empty_cache()
+        gc.collect()
+        print(f"[inference] Unloaded {model_name}")
+
+def get_loaded_model() -> str | None:
+    """Return the name of the currently loaded model, or None."""
+    if _model_cache:
+        return next(iter(_model_cache))
+    return None
