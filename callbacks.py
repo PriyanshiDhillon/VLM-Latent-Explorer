@@ -17,6 +17,7 @@ import base64
 import io
 import json
 import numpy as np
+from pathlib import Path
 from dash import Input, Output, State, callback, ctx, no_update, ALL
 from dash.exceptions import PreventUpdate
 from PIL import Image
@@ -156,6 +157,7 @@ def register_callbacks(app):
 
     @app.callback(
         Output("uploaded-image-preview", "src"),
+        Output("uploaded-image-preview", "style"),  
         Output("store-current-image-b64", "data"),
         Input("image-upload", "contents"),
         prevent_initial_call=True,
@@ -163,7 +165,7 @@ def register_callbacks(app):
     def preview_image(contents):
         if not contents:
             raise PreventUpdate
-        return contents, contents
+        return contents, {"display": "block"}, contents
 
     @app.callback(
         Output("question-input", "value"),
@@ -189,6 +191,29 @@ def register_callbacks(app):
             return question, b64, b64
         except Exception:
             return question, no_update, no_update
+
+
+    @app.callback(
+        Output("model-load-status",   "children"),
+        Output("model-load-progress", "value"),
+        Output("model-load-progress", "style"),
+        Input("load-model-btn", "n_clicks"),
+        State("model-selector", "value"),
+        prevent_initial_call=True,
+    )
+    def load_model_on_click(n_clicks, model_name):
+        if not model_name:
+            return "No model selected.", 0, {"display": "none"}
+        current = inf.get_loaded_model()
+        if current and current != model_name:
+            inf.unload_model(current)
+        if model_name in inf._model_cache:
+            return f"✓ {model_name} ready.", 100, {"display": "none"}
+        try:
+            inf._get_model_and_processor(model_name)
+            return f"✓ {model_name} ready.", 100, {"display": "none"}
+        except Exception as e:
+            return f"✗ Failed: {e}", 0, {"display": "none"}
 
     @app.callback(
         Output("store-corpus-embeddings", "data"),
@@ -223,12 +248,38 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def run_inference(n_clicks, img_b64, question, model_name, existing_instances):
-        if not img_b64 or not question:
+        if not model_name or not img_b64 or not question:
             raise PreventUpdate
 
         image = _b64_to_pil(img_b64)
         result = inf.run_inference(image, question, model_name)
+        inst_id = f"instance_{len(existing_instances) + 1}"   # ← define first
 
+        cache_dir = Path("precomputed/online_cache") / model_name
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        np.savez(
+            cache_dir / f"{inst_id}.npz",
+            activations=result["activations"],
+            token_types=np.array(result["token_types"]),
+            token_strings=np.array(result["token_strings"]),
+            token_ids=np.array(result["token_ids"]),
+            generated_text=result["generated_text"],
+            image_grid_hw=np.array(result["image_grid_hw"]),
+        )
+
+        attn_weights_saveable = [
+            w if w is not None else np.array([])
+            for w in result["attn_weights"]
+        ]
+        attn_arr = np.empty(len(attn_weights_saveable), dtype=object)
+        for i, w in enumerate(attn_weights_saveable):
+            attn_arr[i] = w
+        np.save(
+            cache_dir / f"{inst_id}_attn_weights.npy",
+            attn_arr,
+            allow_pickle=True,
+        )
         if dl.umap_model_exists(model_name):
             try:
                 coords_2d = proj.project_onto_manifold(result["activations"], model_name)
@@ -238,7 +289,7 @@ def register_callbacks(app):
         else:
             result["coords_2d"] = None
 
-        inst_id = f"instance_{len(existing_instances) + 1}"
+       # inst_id = f"instance_{len(existing_instances) + 1}"
         updated_instances = dict(existing_instances)
         updated_instances[inst_id] = _result_to_serialisable(result)
 
@@ -286,7 +337,9 @@ def register_callbacks(app):
 
         if img_b64:
             image = _b64_to_pil(img_b64)
-            heatmap_src = hm.attn_to_heatmap_overlay(image, attn_at_step, grid_hw)
+            image_token_range = result.get("image_token_range")
+            heatmap_src = hm.attn_to_heatmap_overlay(image, attn_at_step, grid_hw,
+                                                      image_token_range=image_token_range)
         else:
             heatmap_src = ""
 
@@ -389,7 +442,28 @@ def register_callbacks(app):
         triggered = ctx.triggered_id
         if triggered is None:
             raise PreventUpdate
+        if not ctx.triggered or not ctx.triggered[0]["value"]:
+            raise PreventUpdate
         return triggered["index"]
+        
+    @app.callback(
+        Output("reasoning-trace", "children", allow_duplicate=True),
+        Output("instance-list",   "children", allow_duplicate=True),
+        Input("store-active-instance", "data"),
+        State("store-instances",       "data"),
+        prevent_initial_call=True,
+    )
+    def update_trace_on_switch(active_id, instances):
+        if not active_id or active_id not in instances:
+            raise PreventUpdate
+        result = instances[active_id]
+        trace = _build_reasoning_trace(
+            result.get("token_strings", []),
+            result.get("token_types", []),
+        )
+        badges = _build_instance_list(instances, active_id)
+        return trace, badges
+
 
     @app.callback(
         Output("eval-display", "children"),
