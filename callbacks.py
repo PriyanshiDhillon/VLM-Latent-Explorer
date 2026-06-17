@@ -442,7 +442,28 @@ def register_callbacks(app):
         triggered = ctx.triggered_id
         if triggered is None:
             raise PreventUpdate
+        if not ctx.triggered or not ctx.triggered[0]["value"]:
+            raise PreventUpdate
         return triggered["index"]
+        
+    @app.callback(
+        Output("reasoning-trace", "children", allow_duplicate=True),
+        Output("instance-list",   "children", allow_duplicate=True),
+        Input("store-active-instance", "data"),
+        State("store-instances",       "data"),
+        prevent_initial_call=True,
+    )
+    def update_trace_on_switch(active_id, instances):
+        if not active_id or active_id not in instances:
+            raise PreventUpdate
+        result = instances[active_id]
+        trace = _build_reasoning_trace(
+            result.get("token_strings", []),
+            result.get("token_types", []),
+        )
+        badges = _build_instance_list(instances, active_id)
+        return trace, badges
+
 
     @app.callback(
         Output("eval-display", "children"),
