@@ -45,6 +45,13 @@ def sidebar() -> html.Div:
                 placeholder="Select a model",
                 className="sidebar-select mb-2",
             ),
+            dbc.Button(
+                "Load Model",
+                id="load-model-btn",
+                className="w-100 mb-2",
+                color="secondary",
+                size="sm",
+            ),
             dcc.Loading(
                 type="circle",
                 children=html.Div(id="model-load-status",
