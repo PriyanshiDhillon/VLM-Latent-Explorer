@@ -149,7 +149,14 @@ html, body {
   letter-spacing: -0.02em;
 }
 
-
+.page-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: var(--page-bg);
+  margin: -28px -24px 0 -24px;
+  padding: 28px 24px 4px;
+}
 
 .top-bar {
   display: flex;
