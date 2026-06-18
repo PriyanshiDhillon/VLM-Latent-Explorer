@@ -22,9 +22,9 @@ _model_cache: dict = {}
 _processor_cache: dict = {}
 
 MODEL_IDS = {
-    "qwen":  "/gpfs/scratch1/shared/kguanmma/Qwen2.5-VL-7B-Instruct",
-    "monet": "/gpfs/scratch1/shared/kguanmma/Monet-7B",
-    "lvr":   "/gpfs/scratch1/shared/kguanmma/LVR-7B",
+    "qwen": "model/Qwen2.5-VL-7B-Instruct",
+    "monet": "model/Monet-7B",
+    "lvr": "model/LVR-7B",
 }
 
 # Token type classification

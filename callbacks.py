@@ -77,9 +77,30 @@ def _build_umap_figure(
     instances: dict,
     active_id: str | None,
     current_step: int,
+    projection_mode: str = "umap",
 ) -> go.Figure:
     """Build the UMAP scatter figure with corpus background + instance trajectories."""
     fig = go.Figure()
+    
+    if projection_mode == "tsne":
+        # Re-project corpus points with t-SNE instead of using raw UMAP coords
+        if corpus and corpus.get("coords"):
+            raw_coords = np.array(corpus["coords"])
+            tsne_coords, _ = proj.tsne_reproject(raw_coords, corpus["types"])
+            corpus = dict(corpus)          # shallow copy so we don't mutate the original
+            corpus["coords"] = tsne_coords.tolist()
+
+        # Re-project each instance's per-token coords too
+        new_instances = {}
+        for inst_id, inst_data in instances.items():
+            result = _result_from_serialisable(inst_data)
+            coords_2d = result.get("coords_2d")
+            if coords_2d is not None and len(coords_2d) >= 5:
+                tsne_coords, _ = proj.tsne_reproject(np.array(coords_2d), result.get("token_types", []))
+                result["coords_2d"] = tsne_coords
+            new_instances[inst_id] = _result_to_serialisable(result)
+        instances = new_instances
+    
     fig.update_layout(
         template="plotly_white",
         paper_bgcolor="#ffffff",
@@ -343,7 +364,7 @@ def register_callbacks(app):
         else:
             heatmap_src = ""
 
-        fig = _build_umap_figure(corpus, instances, active_id, step)
+        fig = _build_umap_figure(corpus, instances, active_id, step, projection_mode)
 
         token_str = ""
         if step < len(result.get("token_strings", [])):

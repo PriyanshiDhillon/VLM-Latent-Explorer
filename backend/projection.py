@@ -50,7 +50,7 @@ def tsne_reproject(points_2d: np.ndarray, labels: list[str]) -> tuple[np.ndarray
         n_components=2,
         perplexity=perplexity,
         random_state=42,
-        n_iter=500,
+        max_iter=500,
         init="pca" if len(points_2d) > 10 else "random",
     )
     coords_tsne = tsne.fit_transform(points_2d)
