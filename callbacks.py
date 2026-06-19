@@ -118,7 +118,7 @@ def _build_umap_figure(
             mask = [i for i, t in enumerate(types) if t == ttype]
             if not mask:
                 continue
-            fig.add_trace(go.Scatter(
+            fig.add_trace(go.Scattergl(
                 x=coords[mask, 0], y=coords[mask, 1],
                 mode="markers",
                 marker=dict(color=color, size=3, opacity=0.25),
@@ -143,7 +143,7 @@ def _build_umap_figure(
                 continue
             sizes = [10 if i == current_step else 6 for i in mask]
             symbols = ["star" if i == current_step else "circle" for i in mask]
-            fig.add_trace(go.Scatter(
+            fig.add_trace(go.Scattergl(
                 x=coords_2d[mask, 0], y=coords_2d[mask, 1],
                 mode="markers",
                 marker=dict(
@@ -248,7 +248,6 @@ def register_callbacks(app):
             return {
                 "coords": corpus["coords"].tolist(),
                 "types":  corpus["types"],
-                "labels": corpus["labels"],
             }
         except Exception:
             return {}
@@ -312,8 +311,10 @@ def register_callbacks(app):
 
        # inst_id = f"instance_{len(existing_instances) + 1}"
         updated_instances = dict(existing_instances)
-        updated_instances[inst_id] = _result_to_serialisable(result)
-
+        serialisable = _result_to_serialisable(
+            {k: v for k, v in result.items() if k != "activations"}
+        )
+        updated_instances[inst_id] = serialisable
         n_steps = len(result["token_strings"])
         marks = {i: str(i) for i in range(0, n_steps, max(1, n_steps // 10))}
 

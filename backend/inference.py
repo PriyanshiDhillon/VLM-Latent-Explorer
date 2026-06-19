@@ -18,6 +18,8 @@ import torch
 from pathlib import Path
 from typing import Optional
 from PIL import Image
+from qwen_vl_utils import process_vision_info
+
 _model_cache: dict = {}
 _processor_cache: dict = {}
 
@@ -27,9 +29,18 @@ MODEL_IDS = {
     "lvr": "model/LVR-7B",
 }
 
-# Token type classification
-LATENT_TRIGGER_TOKEN = "<|latent|>"   # adjust to whatever Monet/LVR actually use
+MAX_PIXELS = 512 * 512
 
+LATENT_MARKERS = (
+    "<abs_vis_token>",        # Monet
+    "</abs_vis_token>",
+    "<|latent|>",
+    "<latent>",
+    "<visual_latent>",
+    "<|lvr_start|>",          # LVR
+    "<|lvr_latent_end|>",
+    "<|lvr_end|>",
+)
 
 def _get_model_and_processor(model_name: str):
     """Load (and cache) a model + processor by name."""
@@ -59,11 +70,12 @@ def _get_model_and_processor(model_name: str):
 # ---------------------------------------------------------------------------
 
 class ActivationStore:
-    """Collects activations and attention weights injected by forward hooks."""
+    """Collects attention weights injected by forward hooks, plus hidden states
+    extracted from generate(output_hidden_states=True)."""
 
     def __init__(self):
-        self.hidden_states: list[np.ndarray] = [] 
-        self.attn_weights: list[np.ndarray] = []  
+        self.hidden_states: list[np.ndarray] = []
+        self.attn_weights: list[np.ndarray] = []
         self._hooks: list = []
 
     def clear(self):
@@ -78,29 +90,23 @@ class ActivationStore:
 
 def _register_hooks(model, store: ActivationStore, target_layer: int = -1):
     """
-    Register forward hooks on the last (or specified) transformer decoder layer.
+    Register an attention forward hook on the target decoder layer.
 
-    - Hidden state hook: captures the output of the target layer.
-    - Attention hook: captures cross-attention (or self-attention) weights.
+    Hidden states are NOT captured via a hook anymore: a hook on layers[-1]
+    sees the pre-final-norm output, whereas the corpus stores the post-norm
+    hidden_states[-1]. To stay on-manifold, hidden states are pulled from
+    generate(output_hidden_states=True) in run_inference instead.
     """
     layers = model.model.language_model.layers
     layer = layers[target_layer]
 
-    def _hidden_hook(module, input, output):
-        if store._skip_next:
-            store._skip_next = False
-            return
-        hs = output[0][-1, :].detach().float().cpu().numpy()  # ← remove the [0, ] batch dim
-        store.hidden_states.append(hs)
-
     def _attn_hook(module, input, output):
         if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
-            w = output[1][0, :, -1, :].mean(0).detach().float().cpu().numpy() # testing average over heads
+            w = output[1][0, :, -1, :].mean(0).detach().float().cpu().numpy()  # average over heads
             store.attn_weights.append(w)
         else:
             store.attn_weights.append(None)
 
-    store._hooks.append(layer.register_forward_hook(_hidden_hook))
     if hasattr(layer, "self_attn"):
         store._hooks.append(layer.self_attn.register_forward_hook(_attn_hook))
 
@@ -108,7 +114,6 @@ def _register_hooks(model, store: ActivationStore, target_layer: int = -1):
 # ---------------------------------------------------------------------------
 # Token type classification
 # ---------------------------------------------------------------------------
-
 def _classify_token_types(
     token_ids: list[int],
     processor,
@@ -116,23 +121,18 @@ def _classify_token_types(
     model_name: str,
 ) -> list[str]:
     """
-    Label each generated token as 'text', 'visual', or 'latent'.
-
-    - visual  : image patch tokens inserted by the processor
-    - latent  : tokens generated after a latent trigger (Monet/LVR only)
-    - text    : everything else
+    Per-token labels: 'text' | 'visual' | 'latent'.
+    A token is 'latent' iff it *is* a latent marker; it does not open a span
+    that swallows the following answer text.
     """
-    vocab = processor.tokenizer.get_vocab()
-    latent_id = vocab.get(LATENT_TRIGGER_TOKEN, None)
+    tokenizer = processor.tokenizer
+    vision_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
+    vision_end_id   = tokenizer.convert_tokens_to_ids("<|vision_end|>")
 
-    vision_start_id = vocab.get("<|vision_start|>", None)
-    vision_end_id   = vocab.get("<|vision_end|>", None)
-
-    types = []
+    types: list[str] = []
     in_visual = False
-    in_latent = False
-
     for tid in token_ids:
+        tok_str = tokenizer.decode([tid], skip_special_tokens=False)
         if tid == vision_start_id:
             in_visual = True
             types.append("visual")
@@ -141,21 +141,11 @@ def _classify_token_types(
             types.append("visual")
         elif in_visual:
             types.append("visual")
-        elif model_name in ("monet", "lvr") and tid == latent_id:
-            in_latent = True
+        elif any(marker in tok_str for marker in LATENT_MARKERS):
             types.append("latent")
-        elif in_latent:
-            decoded = processor.tokenizer.decode([tid])
-            if decoded.strip() in ("", "\n") or tid == processor.tokenizer.eos_token_id:
-                in_latent = False
-                types.append("text")
-            else:
-                types.append("latent")
         else:
             types.append("text")
-
     return types
-
 
 # ---------------------------------------------------------------------------
 # Main inference function
@@ -187,12 +177,13 @@ def run_inference(
     -------
     dict with keys:
         activations    : np.ndarray (T, D)
-        attn_weights   : list[np.ndarray | None]  length T, each (num_heads, src_len) or None
+        attn_weights   : list[np.ndarray | None]
         token_types    : list[str]  length T
         token_strings  : list[str]  length T
         token_ids      : list[int]  length T
         generated_text : str
-        image_grid_hw  : tuple[int, int]  — spatial grid dims of image patches
+        image_grid_hw  : tuple[int, int]
+        image_token_range : tuple[int, int]
     """
     model, processor = _get_model_and_processor(model_name)
 
@@ -200,7 +191,7 @@ def run_inference(
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": image},
+                {"type": "image", "image": image, "max_pixels": MAX_PIXELS},
                 {"type": "text",  "text": question},
             ],
         }
@@ -209,9 +200,11 @@ def run_inference(
     text_prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
+    image_inputs, video_inputs = process_vision_info(messages)
     inputs = processor(
         text=[text_prompt],
-        images=[image],
+        images=image_inputs,
+        videos=video_inputs,
         return_tensors="pt",
         padding=True,
     ).to(model.device)
@@ -237,22 +230,33 @@ def run_inference(
         img_token_start = 0
         img_token_end   = grid_h * grid_w
     print(f"[debug] tokens in range: {img_token_end - img_token_start}, grid_h*grid_w: {grid_h * grid_w}")
+
     store = ActivationStore()
-    store._skip_next = True
     _register_hooks(model, store)
 
     with torch.no_grad():
-        output_ids = model.generate(
+        outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
-            output_attentions=True, 
+            output_attentions=True,        # populates attn weights for the hook
+            output_hidden_states=True,     # post-norm hidden states, per step
+            return_dict_in_generate=True,
         )
 
     store.remove_hooks()
 
+    sequences = outputs.sequences
     input_len = inputs["input_ids"].shape[1]
-    gen_ids = output_ids[0, input_len:].tolist()
+    gen_ids = sequences[0, input_len:].tolist()
+    
+    for step_hs in outputs.hidden_states:
+        last_layer = step_hs[-1]
+        if last_layer.ndim != 3:
+            continue
+        vec = last_layer[0, -1, :].detach().float().cpu().numpy().astype(np.float16)
+        store.hidden_states.append(vec)
+    store.hidden_states = store.hidden_states[:len(gen_ids)]
 
     token_strings = [
         processor.tokenizer.decode([tid], skip_special_tokens=False)
@@ -266,7 +270,10 @@ def run_inference(
 
     token_types = _classify_token_types(all_ids, processor, grid_h * grid_w, model_name)
 
-    activations_array = np.stack(all_activations) if all_activations else np.empty((0, model.config.hidden_size))
+    if all_activations:
+        activations_array = np.stack(all_activations).astype(np.float32)
+    else:
+        activations_array = np.empty((0, model.config.hidden_size), dtype=np.float32)
 
     return {
         "activations":    activations_array,
@@ -312,7 +319,6 @@ def run_edited_inference(
     )
 
 
-
 def unload_model(model_name: str):
     """Unload a model from cache and free GPU memory."""
     import gc
@@ -322,6 +328,7 @@ def unload_model(model_name: str):
         torch.cuda.empty_cache()
         gc.collect()
         print(f"[inference] Unloaded {model_name}")
+
 
 def get_loaded_model() -> str | None:
     """Return the name of the currently loaded model, or None."""
