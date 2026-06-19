@@ -25,14 +25,11 @@ MODEL_PATHS = {
 }
 
 LATENT_MARKERS = (
-    "<abs_vis_token>",        # Monet
+    "<abs_vis_token>",
     "</abs_vis_token>",
     "<|latent|>",
     "<latent>",
     "<visual_latent>",
-    "<|lvr_start|>",          # LVR
-    "<|lvr_latent_end|>",
-    "<|lvr_end|>",
 )
 
 VISION_TOKENS = (
@@ -201,6 +198,7 @@ def classify_tokens(tokenizer, token_ids, prompt_len):
     vision_end_id = tokenizer.convert_tokens_to_ids("<|vision_end|>")
 
     in_vision = False
+    in_latent = False
 
     for idx, token_id in enumerate(token_ids):
         token_str = token_text(tokenizer, token_id)
@@ -215,7 +213,12 @@ def classify_tokens(tokenizer, token_ids, prompt_len):
         elif in_vision or token_id in vision_ids:
             token_type = "visual"
         elif any(marker in token_str for marker in LATENT_MARKERS):
+            in_latent = "<abs_vis_token>" in token_str or "<|latent|>" in token_str
             token_type = "latent"
+        elif in_latent and source == "generated":
+            token_type = "latent"
+            if "</abs_vis_token>" in token_str:
+                in_latent = False
         else:
             token_type = "text"
 
