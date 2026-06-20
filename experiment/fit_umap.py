@@ -21,6 +21,8 @@ for model_name in MODELS:
     all_types = []
     all_labels = []
     all_example_ids = []
+    all_gen_index = []
+    all_token_index = []
 
     for npz_path in npz_files:
         data = np.load(npz_path, allow_pickle=True)
@@ -32,15 +34,28 @@ for model_name in MODELS:
 
         token_types   = data["token_types"].tolist()
         token_strings = data["token_strings"].tolist()
+        token_sources = data["token_sources"].tolist()
 
-        # Trim lists to match valid rows
+        gen_index, g = [], 0
+        for s in token_sources:
+            if s == "generated":
+                gen_index.append(g); g += 1
+            else:
+                gen_index.append(-1)
+        token_index = list(range(len(token_sources)))
+
+        # Trim every per-token list to match valid rows
         token_types   = [t for t, v in zip(token_types, valid_mask) if v]
         token_strings = [s for s, v in zip(token_strings, valid_mask) if v]
+        gen_index     = [x for x, v in zip(gen_index, valid_mask) if v]
+        token_index   = [x for x, v in zip(token_index, valid_mask) if v]
 
         all_activations.append(acts)
         all_types.extend(token_types)
         all_labels.extend(token_strings)
         all_example_ids.extend([npz_path.stem] * len(acts))
+        all_gen_index.extend(gen_index)
+        all_token_index.extend(token_index)
 
     activations = np.concatenate(all_activations, axis=0)
     print(f"[{model_name}] Fitting UMAP on {activations.shape} ...")
@@ -59,6 +74,8 @@ for model_name in MODELS:
         types=np.array(all_types, dtype=object),
         labels=np.array(all_labels, dtype=object),
         example_ids=np.array(all_example_ids, dtype=object),
+        gen_index=np.array(all_gen_index, dtype=np.int64),
+        token_index=np.array(all_token_index, dtype=np.int64),
     )
     print(f"[{model_name}] Saved corpus_2d_{model_name}.npz  ({len(activations)} tokens)")
 

@@ -32,12 +32,16 @@ def load_corpus_embeddings(model_name: str) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Corpus embeddings not found at {path}. Run offline pipeline first.")
     data = np.load(path, allow_pickle=True)
-    return {
-        "coords":      data["coords"],
-        "types":       data["types"].tolist(),
-        "example_ids": data["example_ids"].tolist(),
-        "labels":      data["labels"].tolist(),
-    }
+    out = {
+            "coords":      data["coords"],
+            "types":       data["types"].tolist(),
+            "example_ids": data["example_ids"].tolist(),
+            "labels":      data["labels"].tolist(),
+        }
+    for k in ("gen_index", "token_index"):
+        if k in data:
+            out[k] = data[k].tolist()
+    return out
 
 
 def load_example_cache(example_id: str, model_name: str) -> dict:

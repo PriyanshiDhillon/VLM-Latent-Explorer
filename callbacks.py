@@ -71,6 +71,12 @@ def _result_from_serialisable(result: dict) -> dict:
             out[k] = v
     return out
 
+def _passage(example_id):
+    """Map an example id like 'example_000007' to a 1-based passage number (8)."""
+    try:
+        return int(str(example_id).split("_")[-1]) + 1
+    except (ValueError, IndexError):
+        return example_id
 
 def _build_umap_figure(
     corpus: dict | None,
@@ -112,20 +118,40 @@ def _build_umap_figure(
     )
 
     if corpus and corpus.get("coords"):
-        coords = np.array(corpus["coords"])
-        types  = corpus["types"]
+        coords      = np.array(corpus["coords"])
+        types       = corpus["types"]
+        labels      = corpus.get("labels")
+        example_ids = corpus.get("example_ids")
+        genidx      = corpus.get("gen_index")
+        tokidx      = corpus.get("token_index")
+        have_meta = example_ids is not None and genidx is not None
+
         for ttype, color in TOKEN_COLORS.items():
             mask = [i for i, t in enumerate(types) if t == ttype]
             if not mask:
                 continue
-            fig.add_trace(go.Scattergl(
+            tk = dict(
                 x=coords[mask, 0], y=coords[mask, 1],
                 mode="markers",
                 marker=dict(color=color, size=3, opacity=0.25),
                 name=f"corpus:{ttype}",
                 showlegend=True,
-            ))
-
+            )
+            if have_meta:
+                cd = []
+                for i in mask:
+                    seq = f"gen {genidx[i]}" if genidx[i] >= 0 else \
+                          (f"input {tokidx[i]}" if tokidx else "input")
+                    lab = (labels[i] if labels else "").strip() or "·"
+                    cd.append([_passage(example_ids[i]), seq, lab])
+                tk["customdata"] = cd
+                tk["hovertemplate"] = (
+                    f"<b>Passage %{{customdata[0]}}</b> · {ttype}<br>"
+                    "seq: %{customdata[1]}<br>"
+                    "token: %{customdata[2]}<br>"
+                    "(%{x:.2f}, %{y:.2f})<extra></extra>"
+                )
+            fig.add_trace(go.Scattergl(**tk))
 
     for idx, (inst_id, inst_data) in enumerate(instances.items()):
         result = _result_from_serialisable(inst_data)
@@ -245,10 +271,14 @@ def register_callbacks(app):
             return {}
         try:
             corpus = dl.load_corpus_embeddings(model_name)
-            return {
+            store = {
                 "coords": corpus["coords"].tolist(),
                 "types":  corpus["types"],
             }
+            for k in ("labels", "example_ids", "gen_index", "token_index"):
+                if k in corpus:
+                    store[k] = corpus[k]
+            return store
         except Exception:
             return {}
 
