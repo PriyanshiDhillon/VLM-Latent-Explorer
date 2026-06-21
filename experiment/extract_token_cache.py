@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -8,13 +9,23 @@ from PIL import Image
 from qwen_vl_utils import process_vision_info
 from transformers import AutoProcessor
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.latent_model import (
+    LEGACY_QWEN_KEY_MAPPING,
+    LatentAwareQwen2_5_VLForConditionalGeneration,
+    validate_checkpoint_load,
+)
+
 try:
     from transformers import Qwen2_5_VLForConditionalGeneration
 except ImportError:  # Older/newer transformers builds may expose only Auto classes.
     Qwen2_5_VLForConditionalGeneration = None
 
 
-ROOT = Path.home() / "VLM-Latent-Explorer"
+ROOT = PROJECT_ROOT
 DATA_PATH = ROOT / "data" / "subset" / "metadata.json"
 OUTPUT_ROOT = ROOT / "precomputed" / "corpus_embeddings"
 
@@ -25,11 +36,13 @@ MODEL_PATHS = {
 }
 
 LATENT_MARKERS = (
-    "<abs_vis_token>",
-    "</abs_vis_token>",
-    "<|latent|>",
-    "<latent>",
-    "<visual_latent>",
+    "<abs_vis_token>",       # Monet: opens a latent visual span.
+    "<abs_vis_token_pad>",   # Monet: occupies a latent visual position.
+    "</abs_vis_token>",      # Monet: closes a latent visual span.
+    "<|lvr_start|>",         # LVR: opens a latent reasoning block.
+    "<|lvr|>",               # LVR: occupies a latent reasoning position.
+    "<|lvr_latent_end|>",    # LVR: ends the latent phase.
+    "<|lvr_end|>",           # LVR: closes the reasoning block.
 )
 
 VISION_TOKENS = (
@@ -108,34 +121,47 @@ def load_model(model_name):
     )
 
     print(f"[{model_name}] loading model from {model_path}")
-    model_classes = []
-    if Qwen2_5_VLForConditionalGeneration is not None:
-        model_classes.append(Qwen2_5_VLForConditionalGeneration)
+    if model_name != "qwen":
+        model_classes = [LatentAwareQwen2_5_VLForConditionalGeneration]
+    else:
+        model_classes = []
+        if Qwen2_5_VLForConditionalGeneration is not None:
+            model_classes.append(Qwen2_5_VLForConditionalGeneration)
 
-    try:
-        from transformers import AutoModelForVision2Seq
+        try:
+            from transformers import AutoModelForVision2Seq
 
-        model_classes.append(AutoModelForVision2Seq)
-    except ImportError:
-        pass
+            model_classes.append(AutoModelForVision2Seq)
+        except ImportError:
+            pass
 
-    from transformers import AutoModelForCausalLM
+        from transformers import AutoModelForCausalLM
 
-    model_classes.append(AutoModelForCausalLM)
+        model_classes.append(AutoModelForCausalLM)
 
     last_error = None
     model = None
     for model_cls in model_classes:
         try:
             print(f"[{model_name}] trying {model_cls.__name__}")
-            model = model_cls.from_pretrained(
-                model_path,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-                local_files_only=True,
-                trust_remote_code=True,
-                attn_implementation="eager",
-            )
+            load_kwargs = {
+                "torch_dtype": torch.bfloat16,
+                "device_map": "auto",
+                "local_files_only": True,
+                "trust_remote_code": True,
+                "attn_implementation": "eager",
+            }
+            if model_name != "qwen":
+                model, loading_info = model_cls.from_pretrained(
+                    model_path,
+                    key_mapping=LEGACY_QWEN_KEY_MAPPING,
+                    output_loading_info=True,
+                    **load_kwargs,
+                )
+                validate_checkpoint_load(loading_info, str(model_path))
+                model.configure_latent_decoding(model_name)
+            else:
+                model = model_cls.from_pretrained(model_path, **load_kwargs)
             break
         except Exception as exc:
             last_error = exc

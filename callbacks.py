@@ -14,6 +14,7 @@ Wiring:
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import numpy as np
@@ -37,6 +38,7 @@ TOKEN_COLORS = {
 }
 
 INSTANCE_LINE_STYLES = ["solid", "dash", "dot", "dashdot"]
+_TSNE_CACHE: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -78,6 +80,50 @@ def _passage(example_id):
     except (ValueError, IndexError):
         return example_id
 
+
+def _joint_tsne_projection(corpus: dict, instances: dict) -> tuple[dict, dict]:
+    """Fit corpus and live points together so every trace shares one t-SNE frame."""
+    corpus_coords = np.asarray(corpus.get("coords", []), dtype=np.float32)
+    instance_coords = {}
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(corpus_coords.tobytes())
+
+    for inst_id, inst_data in instances.items():
+        result = _result_from_serialisable(inst_data)
+        coords = result.get("coords_2d")
+        if coords is None or len(coords) == 0:
+            continue
+        coords = np.asarray(coords, dtype=np.float32)
+        instance_coords[inst_id] = coords
+        digest.update(inst_id.encode("utf-8"))
+        digest.update(coords.tobytes())
+
+    cache_key = digest.hexdigest()
+    cached = _TSNE_CACHE.get(cache_key)
+    if cached is None:
+        blocks = [corpus_coords, *instance_coords.values()]
+        combined = np.concatenate(blocks, axis=0)
+        transformed, _ = proj.tsne_reproject(combined, [])
+        offset = len(corpus_coords)
+        transformed_instances = {}
+        for inst_id, coords in instance_coords.items():
+            transformed_instances[inst_id] = transformed[offset : offset + len(coords)]
+            offset += len(coords)
+        cached = (transformed[: len(corpus_coords)], transformed_instances)
+        if len(_TSNE_CACHE) >= 4:
+            _TSNE_CACHE.pop(next(iter(_TSNE_CACHE)))
+        _TSNE_CACHE[cache_key] = cached
+
+    corpus_tsne, instances_tsne = cached
+    projected_corpus = dict(corpus)
+    projected_corpus["coords"] = corpus_tsne.tolist()
+    projected_instances = dict(instances)
+    for inst_id, coords in instances_tsne.items():
+        result = _result_from_serialisable(instances[inst_id])
+        result["coords_2d"] = coords
+        projected_instances[inst_id] = _result_to_serialisable(result)
+    return projected_corpus, projected_instances
+
 def _build_umap_figure(
     corpus: dict | None,
     instances: dict,
@@ -88,24 +134,8 @@ def _build_umap_figure(
     """Build the UMAP scatter figure with corpus background + instance trajectories."""
     fig = go.Figure()
     
-    if projection_mode == "tsne":
-        # Re-project corpus points with t-SNE instead of using raw UMAP coords
-        if corpus and corpus.get("coords"):
-            raw_coords = np.array(corpus["coords"])
-            tsne_coords, _ = proj.tsne_reproject(raw_coords, corpus["types"])
-            corpus = dict(corpus)          # shallow copy so we don't mutate the original
-            corpus["coords"] = tsne_coords.tolist()
-
-        # Re-project each instance's per-token coords too
-        new_instances = {}
-        for inst_id, inst_data in instances.items():
-            result = _result_from_serialisable(inst_data)
-            coords_2d = result.get("coords_2d")
-            if coords_2d is not None and len(coords_2d) >= 5:
-                tsne_coords, _ = proj.tsne_reproject(np.array(coords_2d), result.get("token_types", []))
-                result["coords_2d"] = tsne_coords
-            new_instances[inst_id] = _result_to_serialisable(result)
-        instances = new_instances
+    if projection_mode == "tsne" and corpus and corpus.get("coords"):
+        corpus, instances = _joint_tsne_projection(corpus, instances)
     
     fig.update_layout(
         template="plotly_white",
@@ -160,6 +190,7 @@ def _build_umap_figure(
             continue
         coords_2d = np.array(coords_2d)
         token_types = result.get("token_types", [])
+        token_strings = result.get("token_strings", [])
         is_active = inst_id == active_id
 
 
@@ -167,8 +198,12 @@ def _build_umap_figure(
             mask = [i for i, t in enumerate(token_types) if t == ttype]
             if not mask:
                 continue
-            sizes = [10 if i == current_step else 6 for i in mask]
+            sizes = [16 if i == current_step else (10 if is_active else 8) for i in mask]
             symbols = ["star" if i == current_step else "circle" for i in mask]
+            customdata = [
+                [inst_id, i, (token_strings[i] if i < len(token_strings) else "")]
+                for i in mask
+            ]
             fig.add_trace(go.Scattergl(
                 x=coords_2d[mask, 0], y=coords_2d[mask, 1],
                 mode="markers",
@@ -177,10 +212,18 @@ def _build_umap_figure(
                     size=sizes,
                     symbol=symbols,
                     opacity=0.9 if is_active else 0.5,
-                    line=dict(width=1, color="white") if is_active else dict(width=0),
+                    line=dict(width=2 if is_active else 1, color="#111827"),
                 ),
                 name=f"{inst_id}:{ttype}",
+                legendgroup=inst_id,
                 showlegend=True,
+                customdata=customdata,
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b> · " + ttype + "<br>"
+                    "step: %{customdata[1]}<br>"
+                    "token: %{customdata[2]}<br>"
+                    "(%{x:.2f}, %{y:.2f})<extra></extra>"
+                ),
             ))
 
         latent_idx = sorted([i for i, t in enumerate(token_types) if t == "latent"])
@@ -334,8 +377,10 @@ def register_callbacks(app):
             try:
                 coords_2d = proj.project_onto_manifold(result["activations"], model_name)
                 result["coords_2d"] = coords_2d
-            except Exception:
+            except Exception as exc:
                 result["coords_2d"] = None
+                result["projection_error"] = str(exc)
+                print(f"[projection] {model_name}/{inst_id}: {exc}")
         else:
             result["coords_2d"] = None
 
@@ -412,6 +457,8 @@ def register_callbacks(app):
             _stat_row("Instance",   active_id),
             _stat_row("Projection", projection_mode or "umap"),
         ]
+        if result.get("projection_error"):
+            param_children.append(_stat_row("Projection error", result["projection_error"]))
 
         # ── Uncertainty (neighbour-preservation per token) ────────────────
         uncertainty_children = _build_uncertainty_display(result, step)
@@ -444,8 +491,13 @@ def register_callbacks(app):
 
         selected_indices = []
         for pt in selected_data["points"]:
-            if "pointIndex" in pt:
-                selected_indices.append(pt["pointIndex"])
+            customdata = pt.get("customdata")
+            if (
+                isinstance(customdata, (list, tuple))
+                and len(customdata) >= 2
+                and customdata[0] == active_id
+            ):
+                selected_indices.append(int(customdata[1]))
 
         if not selected_indices:
             raise PreventUpdate
@@ -560,8 +612,8 @@ def register_callbacks(app):
                 "tsne",
                 "secondary", True,
                 "primary", False,
-                "t-SNE Projection",
-                "Token embedding space — draw a box to zoom into a region",
+                "Joint t-SNE Re-layout",
+                "Shared t-SNE of corpus + live UMAP coordinates",
             )
 
 
