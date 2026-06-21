@@ -32,32 +32,57 @@ MODEL_IDS = {
 MAX_PIXELS = 512 * 512
 
 LATENT_MARKERS = (
-    "<abs_vis_token>",        # Monet
-    "</abs_vis_token>",
-    "<|latent|>",
-    "<latent>",
-    "<visual_latent>",
-    "<|lvr_start|>",          # LVR
-    "<|lvr_latent_end|>",
-    "<|lvr_end|>",
+    "<abs_vis_token>",       # Monet: opens a latent visual span.
+    "<abs_vis_token_pad>",   # Monet: occupies a latent visual position.
+    "</abs_vis_token>",      # Monet: closes a latent visual span.
+    "<|lvr_start|>",         # LVR: opens a latent reasoning block.
+    "<|lvr|>",               # LVR: occupies a latent reasoning position.
+    "<|lvr_latent_end|>",    # LVR: ends the latent phase.
+    "<|lvr_end|>",           # LVR: closes the reasoning block.
 )
 
 def _get_model_and_processor(model_name: str):
     """Load (and cache) a model + processor by name."""
     if model_name not in _model_cache:
         from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+        from backend.latent_model import (
+            LEGACY_QWEN_KEY_MAPPING,
+            LatentAwareQwen2_5_VLForConditionalGeneration,
+            validate_checkpoint_load,
+        )
 
         model_id = MODEL_IDS[model_name]
         print(f"[inference] Loading {model_id} ...")
 
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_id,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-            attn_implementation="eager",
+        model_class = (
+            Qwen2_5_VLForConditionalGeneration
+            if model_name == "qwen"
+            else LatentAwareQwen2_5_VLForConditionalGeneration
         )
+        load_kwargs = {
+            "torch_dtype": torch.bfloat16,
+            "device_map": "auto",
+            "trust_remote_code": True,
+            "attn_implementation": "eager",
+        }
+        if model_name == "qwen":
+            model = model_class.from_pretrained(model_id, **load_kwargs)
+        else:
+            model, loading_info = model_class.from_pretrained(
+                model_id,
+                key_mapping=LEGACY_QWEN_KEY_MAPPING,
+                output_loading_info=True,
+                **load_kwargs,
+            )
+            validate_checkpoint_load(loading_info, model_id)
+        if model_name != "qwen":
+            model.configure_latent_decoding(model_name)
+            spec = model.latent_decoding
+            print(
+                f"[inference] Enabled {model_name} latent decoding "
+                f"(start={spec.start_id}, latent={spec.placeholder_id}, end={spec.end_id})"
+            )
         model.eval()
         _model_cache[model_name] = model
         _processor_cache[model_name] = processor
@@ -122,8 +147,7 @@ def _classify_token_types(
 ) -> list[str]:
     """
     Per-token labels: 'text' | 'visual' | 'latent'.
-    A token is 'latent' iff it *is* a latent marker; it does not open a span
-    that swallows the following answer text.
+    Boundary and continuous-placeholder positions in a latent span are latent.
     """
     tokenizer = processor.tokenizer
     vision_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
@@ -131,6 +155,16 @@ def _classify_token_types(
 
     types: list[str] = []
     in_visual = False
+    in_latent = False
+    if model_name == "monet":
+        latent_start = tokenizer.convert_tokens_to_ids("<abs_vis_token>")
+        latent_end = tokenizer.convert_tokens_to_ids("</abs_vis_token>")
+    elif model_name == "lvr":
+        latent_start = tokenizer.convert_tokens_to_ids("<|lvr_start|>")
+        latent_end = tokenizer.convert_tokens_to_ids("<|lvr_end|>")
+    else:
+        latent_start = latent_end = None
+
     for tid in token_ids:
         tok_str = tokenizer.decode([tid], skip_special_tokens=False)
         if tid == vision_start_id:
@@ -141,6 +175,13 @@ def _classify_token_types(
             types.append("visual")
         elif in_visual:
             types.append("visual")
+        elif tid == latent_start:
+            in_latent = True
+            types.append("latent")
+        elif in_latent:
+            types.append("latent")
+            if tid == latent_end:
+                in_latent = False
         elif any(marker in tok_str for marker in LATENT_MARKERS):
             types.append("latent")
         else:
@@ -234,6 +275,7 @@ def run_inference(
     store = ActivationStore()
     _register_hooks(model, store)
 
+    print(f"[inference] Running generation for {model_name} ...")
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -243,7 +285,7 @@ def run_inference(
             output_hidden_states=True,     # post-norm hidden states, per step
             return_dict_in_generate=True,
         )
-
+    print(f"[inference] Finished generation for {model_name} ...")
     store.remove_hooks()
 
     sequences = outputs.sequences
