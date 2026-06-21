@@ -160,6 +160,77 @@ def row_one() -> dbc.Row:
     ])
 
 
+def attention_row() -> dbc.Row:
+    return dbc.Row(className="g-3 mb-3", children=[
+        dbc.Col(width=12, children=[
+            html.Div(className="content-card", children=[
+                html.Div(
+                    className="d-flex justify-content-between align-items-start",
+                    children=[
+                        html.Div([
+                            html.Div("Generated Token Attention", className="content-card-title"),
+                            html.Div(
+                                "Rows query previous generated tokens; values are normalized within generated history",
+                                className="content-card-subtitle",
+                            ),
+                            html.Div(
+                                className="attention-layer-control",
+                                children=[
+                                    html.Div(
+                                        className="attention-layer-heading",
+                                        children=[
+                                            html.Span(
+                                                "Decoder layer",
+                                                className="attention-layer-label",
+                                            ),
+                                            html.Button(
+                                                html.Span(className="playback-icon playback-icon--play"),
+                                                id="attention-layer-playback",
+                                                className="attention-layer-playback",
+                                                title="Play decoder layers",
+                                                **{"aria-label": "Play decoder layers"},
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        className="attention-layer-slider-wrap",
+                                        children=dcc.Slider(
+                                            id="attention-layer-slider",
+                                            min=0,
+                                            max=0,
+                                            step=1,
+                                            value=0,
+                                            marks={0: "rerun"},
+                                            updatemode="mouseup",
+                                        ),
+                                    ),
+                                    dcc.Interval(
+                                        id="attention-layer-interval",
+                                        interval=1000,
+                                        n_intervals=0,
+                                        disabled=True,
+                                    ),
+                                ],
+                            ),
+                        ]),
+                        html.Div(className="token-type-legend", children=[
+                            html.Span("T · text", className="token-type-chip token-type-chip--text"),
+                            html.Span("L · latent", className="token-type-chip token-type-chip--latent"),
+                            html.Span("V · visual", className="token-type-chip token-type-chip--visual"),
+                        ]),
+                    ],
+                ),
+                dcc.Graph(
+                    id="token-attention-matrix",
+                    config={"displayModeBar": True, "scrollZoom": True},
+                    style={"height": "520px"},
+                    figure={"data": [], "layout": {"template": "plotly_white"}},
+                ),
+            ]),
+        ]),
+    ])
+
+
 # ── Row 2: Projection (UMAP/t-SNE toggle) + Zoom ─────────────────────────────
 def row_two() -> dbc.Row:
     return dbc.Row(className="g-3 mb-3", children=[
@@ -312,6 +383,7 @@ def build_layout() -> html.Div:
                         ],
                     ),
                     row_one(),
+                    attention_row(),
                     row_two(),
                     row_three(),
                 ],

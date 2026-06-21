@@ -98,14 +98,17 @@ class ActivationStore:
     """Collects attention weights injected by forward hooks, plus hidden states
     extracted from generate(output_hidden_states=True)."""
 
-    def __init__(self):
+    def __init__(self, prompt_length: int = 0):
+        self.prompt_length = prompt_length
         self.hidden_states: list[np.ndarray] = []
         self.attn_weights: list[np.ndarray] = []
+        self.layer_attn_weights: list[list[np.ndarray | None]] = []
         self._hooks: list = []
 
     def clear(self):
         self.hidden_states.clear()
         self.attn_weights.clear()
+        self.layer_attn_weights.clear()
 
     def remove_hooks(self):
         for h in self._hooks:
@@ -115,7 +118,11 @@ class ActivationStore:
 
 def _register_hooks(model, store: ActivationStore, target_layer: int = -1):
     """
-    Register an attention forward hook on the target decoder layer.
+    Register attention hooks on every decoder layer.
+
+    All layers retain attention to generated positions for the token matrix.
+    The target layer additionally retains its full attention vector for the
+    existing image-patch attention visualization.
 
     Hidden states are NOT captured via a hook anymore: a hook on layers[-1]
     sees the pre-final-norm output, whereas the corpus stores the post-norm
@@ -123,17 +130,28 @@ def _register_hooks(model, store: ActivationStore, target_layer: int = -1):
     generate(output_hidden_states=True) in run_inference instead.
     """
     layers = model.model.language_model.layers
-    layer = layers[target_layer]
+    target_index = target_layer % len(layers)
+    store.layer_attn_weights = [[] for _ in layers]
 
-    def _attn_hook(module, input, output):
-        if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
-            w = output[1][0, :, -1, :].mean(0).detach().float().cpu().numpy()  # average over heads
-            store.attn_weights.append(w)
-        else:
-            store.attn_weights.append(None)
+    def _make_attn_hook(layer_index: int):
+        def _attn_hook(module, input, output):
+            if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
+                weights = output[1][0, :, -1, :].mean(0).detach().float().cpu().numpy()
+                generated_weights = weights[store.prompt_length:].astype(np.float16)
+                store.layer_attn_weights[layer_index].append(generated_weights)
+                if layer_index == target_index:
+                    store.attn_weights.append(weights)
+            else:
+                store.layer_attn_weights[layer_index].append(None)
+                if layer_index == target_index:
+                    store.attn_weights.append(None)
+        return _attn_hook
 
-    if hasattr(layer, "self_attn"):
-        store._hooks.append(layer.self_attn.register_forward_hook(_attn_hook))
+    for layer_index, layer in enumerate(layers):
+        if hasattr(layer, "self_attn"):
+            store._hooks.append(
+                layer.self_attn.register_forward_hook(_make_attn_hook(layer_index))
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +218,7 @@ def run_inference(
     prefix_ids: Optional[list[int]] = None,
     prefix_activations: Optional[list[np.ndarray]] = None,
     prefix_attn: Optional[list[np.ndarray]] = None,
+    prefix_layer_attn: Optional[list[list[np.ndarray]]] = None,
 ) -> dict:
     """
     Run a forward pass and return all extracted data needed by the dashboard.
@@ -272,7 +291,8 @@ def run_inference(
         img_token_end   = grid_h * grid_w
     print(f"[debug] tokens in range: {img_token_end - img_token_start}, grid_h*grid_w: {grid_h * grid_w}")
 
-    store = ActivationStore()
+    input_len = inputs["input_ids"].shape[1]
+    store = ActivationStore(prompt_length=input_len)
     _register_hooks(model, store)
 
     print(f"[inference] Running generation for {model_name} ...")
@@ -289,9 +309,8 @@ def run_inference(
     store.remove_hooks()
 
     sequences = outputs.sequences
-    input_len = inputs["input_ids"].shape[1]
     gen_ids = sequences[0, input_len:].tolist()
-    
+
     for step_hs in outputs.hidden_states:
         last_layer = step_hs[-1]
         if last_layer.ndim != 3:
@@ -308,6 +327,14 @@ def run_inference(
 
     all_activations   = (prefix_activations or []) + store.hidden_states
     all_attn          = (prefix_attn or [])        + store.attn_weights
+    if prefix_layer_attn:
+        layer_attn_weights = [
+            list(prefix_layer_attn[i]) + layer_steps
+            if i < len(prefix_layer_attn) else layer_steps
+            for i, layer_steps in enumerate(store.layer_attn_weights)
+        ]
+    else:
+        layer_attn_weights = store.layer_attn_weights
     all_ids           = (prefix_ids or [])         + gen_ids
 
     token_types = _classify_token_types(all_ids, processor, grid_h * grid_w, model_name)
@@ -320,10 +347,13 @@ def run_inference(
     return {
         "activations":    activations_array,
         "attn_weights":   all_attn,
+        "layer_attn_weights": layer_attn_weights,
+        "attention_layer_count": len(layer_attn_weights),
         "token_types":    token_types,
         "token_strings":  token_strings,
         "token_ids":      all_ids,
         "generated_text": generated_text,
+        "prompt_length": input_len,
         "image_grid_hw":  (grid_h, grid_w),
         "image_token_range": (img_token_start, img_token_end),
     }
@@ -347,6 +377,10 @@ def run_edited_inference(
 
     prefix_acts  = original_result["activations"][:edit_step].tolist() if edit_step > 0 else []
     prefix_attn  = original_result["attn_weights"][:edit_step] if edit_step > 0 else []
+    prefix_layer_attn = [
+        layer_steps[:edit_step]
+        for layer_steps in original_result.get("layer_attn_weights", [])
+    ]
     prefix_ids   = original_result["token_ids"][:edit_step]    if edit_step > 0 else []
 
     new_ids = processor.tokenizer.encode(new_token_string, add_special_tokens=False)
@@ -358,6 +392,7 @@ def run_edited_inference(
         prefix_ids=prefix_ids + new_ids,
         prefix_activations=[np.array(a) for a in prefix_acts],
         prefix_attn=prefix_attn,
+        prefix_layer_attn=prefix_layer_attn,
     )
 
 
