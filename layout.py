@@ -278,6 +278,89 @@ def row_two() -> dbc.Row:
                     ],
                 ),
 
+                # ── Controls strip ────────────────────────────────────────
+                html.Div(
+                    className="d-flex flex-wrap align-items-center gap-3 mb-1",
+                    style={"fontSize": "0.78rem", "color": "#374151"},
+                    children=[
+                        # Highlight mode
+                        html.Div([
+                            html.Span("Highlight:", style={"color": "#6b7280", "marginRight": "5px"}),
+                            dcc.RadioItems(
+                                id="highlight-mode",
+                                options=[
+                                    {"label": "All tokens",   "value": "all"},
+                                    {"label": "Up to step",   "value": "step"},
+                                ],
+                                value="all",
+                                inline=True,
+                                inputStyle={"marginRight": "3px"},
+                                labelStyle={"marginRight": "10px"},
+                            ),
+                        ], className="d-flex align-items-center"),
+                        # Show trace toggle
+                        html.Div([
+                            html.Span("Show trace:", style={"color": "#6b7280", "marginRight": "5px"}),
+                            dcc.Checklist(
+                                id="umap-show-trace",
+                                options=[{"label": "", "value": "trace"}],
+                                value=["trace"],
+                                inputStyle={"cursor": "pointer"},
+                            ),
+                        ], className="d-flex align-items-center"),
+                        # Line follows / highlight target
+                        html.Div([
+                            html.Span(
+                                "Line / highlight:",
+                                style={"color": "#6b7280", "marginRight": "5px", "whiteSpace": "nowrap"},
+                            ),
+                            dcc.Dropdown(
+                                id="umap-line-target",
+                                options=[{"label": "Current trace", "value": "__active__"}],
+                                value="__active__",
+                                clearable=False,
+                                style={"width": "170px", "fontSize": "0.78rem"},
+                            ),
+                        ], className="d-flex align-items-center"),
+                    ],
+                ),
+                # ── Corpus passage visibility ──────────────────────────────
+                html.Div(
+                    className="d-flex align-items-center gap-2 mb-2",
+                    children=[
+                        html.Span(
+                            "Corpus:",
+                            style={"fontSize": "0.78rem", "color": "#6b7280", "whiteSpace": "nowrap"},
+                        ),
+                        html.Span(
+                            id="corpus-selection-count",
+                            children="",
+                            style={"fontSize": "0.78rem", "color": "#374151", "whiteSpace": "nowrap"},
+                        ),
+                        dbc.Button(
+                            "Select All", id="btn-corpus-all",
+                            size="sm", color="secondary", outline=True,
+                            style={"fontSize": "0.72rem", "padding": "1px 8px"},
+                            n_clicks=0,
+                        ),
+                        dbc.Button(
+                            "Deselect All", id="btn-corpus-none",
+                            size="sm", color="secondary", outline=True,
+                            style={"fontSize": "0.72rem", "padding": "1px 8px"},
+                            n_clicks=0,
+                        ),
+                        dcc.Dropdown(
+                            id="corpus-passage-dropdown",
+                            options=[],
+                            value=[],
+                            multi=True,
+                            placeholder="Toggle individual passages…",
+                            className="corpus-passage-dropdown",
+                            style={"flex": "1", "fontSize": "0.78rem", "minWidth": "0"},
+                        ),
+                    ],
+                ),
+
                 # ── Main projection graph ─────────────────────────────────
                 dcc.Graph(
                     id="umap-graph",
@@ -286,7 +369,7 @@ def row_two() -> dbc.Row:
                         "displayModeBar": True,
                         "scrollZoom": True,
                     },
-                    style={"height": "380px"},
+                    style={"height": "360px"},
                     figure={
                         "data": [],
                         "layout": {
@@ -329,7 +412,7 @@ def row_three() -> dbc.Row:
             html.Div(className="content-card", children=[
                 html.Div("Zoom — Selected Region", className="content-card-title"),
                 html.Div(
-                    "Re-projection of the bounding-box selection above",
+                    "Re-projection of the bounding-box selection above (highlight follows UMAP setting)",
                     className="content-card-subtitle",
                 ),
                 dcc.Graph(
