@@ -13,6 +13,7 @@ from pathlib import Path
 from sklearn.manifold import TSNE
 
 PRECOMPUTED_DIR = Path("precomputed")
+MAX_LEGACY_UMAP_BYTES = 512 * 1024 * 1024
 
 
 def project_onto_manifold(activations: np.ndarray, model_name: str) -> np.ndarray:
@@ -26,6 +27,11 @@ def project_onto_manifold(activations: np.ndarray, model_name: str) -> np.ndarra
         raise FileNotFoundError(
             f"UMAP model not found at {umap_path}. Run the offline pipeline first."
         )
+    if umap_path.stat().st_size > MAX_LEGACY_UMAP_BYTES:
+        raise RuntimeError(
+            f"{umap_path} is a legacy high-memory UMAP artifact. "
+            "Regenerate the offline projections with experiment/fit_umap.py."
+        )
     umap_model = joblib.load(umap_path)
     coords = umap_model.transform(activations.astype(np.float32))
     return coords
@@ -33,10 +39,11 @@ def project_onto_manifold(activations: np.ndarray, model_name: str) -> np.ndarra
 
 def tsne_reproject(points_2d: np.ndarray, labels: list[str]) -> tuple[np.ndarray, list[str]]:
     """
-    Run t-SNE on a subset of 2D UMAP points (the bounding-box selection).
+    Run t-SNE on a shared set of 2D UMAP points.
 
-    We use the 2D UMAP coords as input (cheap; avoids re-running on raw
-    high-dim activations which we may not have for corpus reference points).
+    We use the 2D UMAP coordinates as input because raw high-dimensional
+    activations are not retained in the dashboard's corpus store. All points
+    that will be overlaid must be passed in one call.
 
     Returns:
         coords_tsne : np.ndarray (N, 2)

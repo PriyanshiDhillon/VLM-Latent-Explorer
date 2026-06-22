@@ -6,7 +6,7 @@ from PIL import Image
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 from qwen_vl_utils import process_vision_info
 
-ROOT = Path.home() / "VLM-Latent-Explorer"
+ROOT = Path(__file__).resolve().parents[1]
 
 MODEL_PATH = ROOT / "model" / "Qwen2.5-VL-7B-Instruct"
 DATA_PATH = ROOT / "data" / "subset" / "metadata.json"

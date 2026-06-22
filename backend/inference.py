@@ -32,32 +32,57 @@ MODEL_IDS = {
 MAX_PIXELS = 512 * 512
 
 LATENT_MARKERS = (
-    "<abs_vis_token>",        # Monet
-    "</abs_vis_token>",
-    "<|latent|>",
-    "<latent>",
-    "<visual_latent>",
-    "<|lvr_start|>",          # LVR
-    "<|lvr_latent_end|>",
-    "<|lvr_end|>",
+    "<abs_vis_token>",       # Monet: opens a latent visual span.
+    "<abs_vis_token_pad>",   # Monet: occupies a latent visual position.
+    "</abs_vis_token>",      # Monet: closes a latent visual span.
+    "<|lvr_start|>",         # LVR: opens a latent reasoning block.
+    "<|lvr|>",               # LVR: occupies a latent reasoning position.
+    "<|lvr_latent_end|>",    # LVR: ends the latent phase.
+    "<|lvr_end|>",           # LVR: closes the reasoning block.
 )
 
 def _get_model_and_processor(model_name: str):
     """Load (and cache) a model + processor by name."""
     if model_name not in _model_cache:
         from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+        from backend.latent_model import (
+            LEGACY_QWEN_KEY_MAPPING,
+            LatentAwareQwen2_5_VLForConditionalGeneration,
+            validate_checkpoint_load,
+        )
 
         model_id = MODEL_IDS[model_name]
         print(f"[inference] Loading {model_id} ...")
 
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_id,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-            attn_implementation="eager",
+        model_class = (
+            Qwen2_5_VLForConditionalGeneration
+            if model_name == "qwen"
+            else LatentAwareQwen2_5_VLForConditionalGeneration
         )
+        load_kwargs = {
+            "torch_dtype": torch.bfloat16,
+            "device_map": "auto",
+            "trust_remote_code": True,
+            "attn_implementation": "eager",
+        }
+        if model_name == "qwen":
+            model = model_class.from_pretrained(model_id, **load_kwargs)
+        else:
+            model, loading_info = model_class.from_pretrained(
+                model_id,
+                key_mapping=LEGACY_QWEN_KEY_MAPPING,
+                output_loading_info=True,
+                **load_kwargs,
+            )
+            validate_checkpoint_load(loading_info, model_id)
+        if model_name != "qwen":
+            model.configure_latent_decoding(model_name)
+            spec = model.latent_decoding
+            print(
+                f"[inference] Enabled {model_name} latent decoding "
+                f"(start={spec.start_id}, latent={spec.placeholder_id}, end={spec.end_id})"
+            )
         model.eval()
         _model_cache[model_name] = model
         _processor_cache[model_name] = processor
@@ -73,14 +98,17 @@ class ActivationStore:
     """Collects attention weights injected by forward hooks, plus hidden states
     extracted from generate(output_hidden_states=True)."""
 
-    def __init__(self):
+    def __init__(self, prompt_length: int = 0):
+        self.prompt_length = prompt_length
         self.hidden_states: list[np.ndarray] = []
         self.attn_weights: list[np.ndarray] = []
+        self.layer_attn_weights: list[list[np.ndarray | None]] = []
         self._hooks: list = []
 
     def clear(self):
         self.hidden_states.clear()
         self.attn_weights.clear()
+        self.layer_attn_weights.clear()
 
     def remove_hooks(self):
         for h in self._hooks:
@@ -90,7 +118,11 @@ class ActivationStore:
 
 def _register_hooks(model, store: ActivationStore, target_layer: int = -1):
     """
-    Register an attention forward hook on the target decoder layer.
+    Register attention hooks on every decoder layer.
+
+    All layers retain attention to generated positions for the token matrix.
+    The target layer additionally retains its full attention vector for the
+    existing image-patch attention visualization.
 
     Hidden states are NOT captured via a hook anymore: a hook on layers[-1]
     sees the pre-final-norm output, whereas the corpus stores the post-norm
@@ -98,17 +130,28 @@ def _register_hooks(model, store: ActivationStore, target_layer: int = -1):
     generate(output_hidden_states=True) in run_inference instead.
     """
     layers = model.model.language_model.layers
-    layer = layers[target_layer]
+    target_index = target_layer % len(layers)
+    store.layer_attn_weights = [[] for _ in layers]
 
-    def _attn_hook(module, input, output):
-        if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
-            w = output[1][0, :, -1, :].mean(0).detach().float().cpu().numpy()  # average over heads
-            store.attn_weights.append(w)
-        else:
-            store.attn_weights.append(None)
+    def _make_attn_hook(layer_index: int):
+        def _attn_hook(module, input, output):
+            if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
+                weights = output[1][0, :, -1, :].mean(0).detach().float().cpu().numpy()
+                generated_weights = weights[store.prompt_length:].astype(np.float16)
+                store.layer_attn_weights[layer_index].append(generated_weights)
+                if layer_index == target_index:
+                    store.attn_weights.append(weights)
+            else:
+                store.layer_attn_weights[layer_index].append(None)
+                if layer_index == target_index:
+                    store.attn_weights.append(None)
+        return _attn_hook
 
-    if hasattr(layer, "self_attn"):
-        store._hooks.append(layer.self_attn.register_forward_hook(_attn_hook))
+    for layer_index, layer in enumerate(layers):
+        if hasattr(layer, "self_attn"):
+            store._hooks.append(
+                layer.self_attn.register_forward_hook(_make_attn_hook(layer_index))
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +165,7 @@ def _classify_token_types(
 ) -> list[str]:
     """
     Per-token labels: 'text' | 'visual' | 'latent'.
-    A token is 'latent' iff it *is* a latent marker; it does not open a span
-    that swallows the following answer text.
+    Boundary and continuous-placeholder positions in a latent span are latent.
     """
     tokenizer = processor.tokenizer
     vision_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
@@ -131,6 +173,16 @@ def _classify_token_types(
 
     types: list[str] = []
     in_visual = False
+    in_latent = False
+    if model_name == "monet":
+        latent_start = tokenizer.convert_tokens_to_ids("<abs_vis_token>")
+        latent_end = tokenizer.convert_tokens_to_ids("</abs_vis_token>")
+    elif model_name == "lvr":
+        latent_start = tokenizer.convert_tokens_to_ids("<|lvr_start|>")
+        latent_end = tokenizer.convert_tokens_to_ids("<|lvr_end|>")
+    else:
+        latent_start = latent_end = None
+
     for tid in token_ids:
         tok_str = tokenizer.decode([tid], skip_special_tokens=False)
         if tid == vision_start_id:
@@ -141,6 +193,13 @@ def _classify_token_types(
             types.append("visual")
         elif in_visual:
             types.append("visual")
+        elif tid == latent_start:
+            in_latent = True
+            types.append("latent")
+        elif in_latent:
+            types.append("latent")
+            if tid == latent_end:
+                in_latent = False
         elif any(marker in tok_str for marker in LATENT_MARKERS):
             types.append("latent")
         else:
@@ -159,6 +218,7 @@ def run_inference(
     prefix_ids: Optional[list[int]] = None,
     prefix_activations: Optional[list[np.ndarray]] = None,
     prefix_attn: Optional[list[np.ndarray]] = None,
+    prefix_layer_attn: Optional[list[list[np.ndarray]]] = None,
 ) -> dict:
     """
     Run a forward pass and return all extracted data needed by the dashboard.
@@ -231,9 +291,11 @@ def run_inference(
         img_token_end   = grid_h * grid_w
     print(f"[debug] tokens in range: {img_token_end - img_token_start}, grid_h*grid_w: {grid_h * grid_w}")
 
-    store = ActivationStore()
+    input_len = inputs["input_ids"].shape[1]
+    store = ActivationStore(prompt_length=input_len)
     _register_hooks(model, store)
 
+    print(f"[inference] Running generation for {model_name} ...")
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -243,13 +305,12 @@ def run_inference(
             output_hidden_states=True,     # post-norm hidden states, per step
             return_dict_in_generate=True,
         )
-
+    print(f"[inference] Finished generation for {model_name} ...")
     store.remove_hooks()
 
     sequences = outputs.sequences
-    input_len = inputs["input_ids"].shape[1]
     gen_ids = sequences[0, input_len:].tolist()
-    
+
     for step_hs in outputs.hidden_states:
         last_layer = step_hs[-1]
         if last_layer.ndim != 3:
@@ -266,6 +327,14 @@ def run_inference(
 
     all_activations   = (prefix_activations or []) + store.hidden_states
     all_attn          = (prefix_attn or [])        + store.attn_weights
+    if prefix_layer_attn:
+        layer_attn_weights = [
+            list(prefix_layer_attn[i]) + layer_steps
+            if i < len(prefix_layer_attn) else layer_steps
+            for i, layer_steps in enumerate(store.layer_attn_weights)
+        ]
+    else:
+        layer_attn_weights = store.layer_attn_weights
     all_ids           = (prefix_ids or [])         + gen_ids
 
     token_types = _classify_token_types(all_ids, processor, grid_h * grid_w, model_name)
@@ -278,10 +347,13 @@ def run_inference(
     return {
         "activations":    activations_array,
         "attn_weights":   all_attn,
+        "layer_attn_weights": layer_attn_weights,
+        "attention_layer_count": len(layer_attn_weights),
         "token_types":    token_types,
         "token_strings":  token_strings,
         "token_ids":      all_ids,
         "generated_text": generated_text,
+        "prompt_length": input_len,
         "image_grid_hw":  (grid_h, grid_w),
         "image_token_range": (img_token_start, img_token_end),
     }
@@ -305,6 +377,10 @@ def run_edited_inference(
 
     prefix_acts  = original_result["activations"][:edit_step].tolist() if edit_step > 0 else []
     prefix_attn  = original_result["attn_weights"][:edit_step] if edit_step > 0 else []
+    prefix_layer_attn = [
+        layer_steps[:edit_step]
+        for layer_steps in original_result.get("layer_attn_weights", [])
+    ]
     prefix_ids   = original_result["token_ids"][:edit_step]    if edit_step > 0 else []
 
     new_ids = processor.tokenizer.encode(new_token_string, add_special_tokens=False)
@@ -316,6 +392,7 @@ def run_edited_inference(
         prefix_ids=prefix_ids + new_ids,
         prefix_activations=[np.array(a) for a in prefix_acts],
         prefix_attn=prefix_attn,
+        prefix_layer_attn=prefix_layer_attn,
     )
 
 
