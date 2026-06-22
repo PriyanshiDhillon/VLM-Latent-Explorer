@@ -11,6 +11,7 @@ vlm_env/
 # Large model/data files — don't commit these
 precomputed/*.pkl
 precomputed/*.npz
+precomputed/*
 precomputed/corpus_embeddings/
 data/subset/images/
 data/subset/metadata.json
@@ -26,3 +27,5 @@ model/LVR-7B/
 
 MMA_Intermediate_Report_J (2).pdf
 *.outprecomputed/
+
+*.out

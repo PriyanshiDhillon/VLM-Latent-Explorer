@@ -14,11 +14,12 @@ Wiring:
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import numpy as np
 from pathlib import Path
-from dash import Input, Output, State, callback, ctx, no_update, ALL
+from dash import Input, Output, State, callback, ctx, html, no_update, ALL
 from dash.exceptions import PreventUpdate
 from PIL import Image
 
@@ -26,6 +27,7 @@ from backend import heatmap as hm
 from backend import projection as proj
 from backend import data_loader as dl
 from backend import inference as inf
+from backend import token_attention as token_attn
 
 import plotly.graph_objects as go
 
@@ -37,6 +39,7 @@ TOKEN_COLORS = {
 }
 
 INSTANCE_LINE_STYLES = ["solid", "dash", "dot", "dashdot"]
+_TSNE_CACHE: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -50,15 +53,16 @@ def _b64_to_pil(b64_str: str) -> Image.Image:
 
 def _result_to_serialisable(result: dict) -> dict:
     """Convert numpy arrays in inference result to lists for dcc.Store."""
-    out = {}
-    for k, v in result.items():
-        if isinstance(v, np.ndarray):
-            out[k] = v.tolist()
-        elif isinstance(v, list) and v and isinstance(v[0], np.ndarray):
-            out[k] = [x.tolist() if isinstance(x, np.ndarray) else x for x in v]
-        else:
-            out[k] = v
-    return out
+    def convert(value):
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if isinstance(value, dict):
+            return {key: convert(item) for key, item in value.items()}
+        return value
+
+    return convert(result)
 
 
 def _result_from_serialisable(result: dict) -> dict:
@@ -78,6 +82,167 @@ def _passage(example_id):
     except (ValueError, IndexError):
         return example_id
 
+
+def _joint_tsne_projection(corpus: dict, instances: dict) -> tuple[dict, dict]:
+    """Fit corpus and live points together so every trace shares one t-SNE frame."""
+    corpus_coords = np.asarray(corpus.get("coords", []), dtype=np.float32)
+    instance_coords = {}
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(corpus_coords.tobytes())
+
+    for inst_id, inst_data in instances.items():
+        result = _result_from_serialisable(inst_data)
+        coords = result.get("coords_2d")
+        if coords is None or len(coords) == 0:
+            continue
+        coords = np.asarray(coords, dtype=np.float32)
+        instance_coords[inst_id] = coords
+        digest.update(inst_id.encode("utf-8"))
+        digest.update(coords.tobytes())
+
+    cache_key = digest.hexdigest()
+    cached = _TSNE_CACHE.get(cache_key)
+    if cached is None:
+        blocks = [corpus_coords, *instance_coords.values()]
+        combined = np.concatenate(blocks, axis=0)
+        transformed, _ = proj.tsne_reproject(combined, [])
+        offset = len(corpus_coords)
+        transformed_instances = {}
+        for inst_id, coords in instance_coords.items():
+            transformed_instances[inst_id] = transformed[offset : offset + len(coords)]
+            offset += len(coords)
+        cached = (transformed[: len(corpus_coords)], transformed_instances)
+        if len(_TSNE_CACHE) >= 4:
+            _TSNE_CACHE.pop(next(iter(_TSNE_CACHE)))
+        _TSNE_CACHE[cache_key] = cached
+
+    corpus_tsne, instances_tsne = cached
+    projected_corpus = dict(corpus)
+    projected_corpus["coords"] = corpus_tsne.tolist()
+    projected_instances = dict(instances)
+    for inst_id, coords in instances_tsne.items():
+        result = _result_from_serialisable(instances[inst_id])
+        result["coords_2d"] = coords
+        projected_instances[inst_id] = _result_to_serialisable(result)
+    return projected_corpus, projected_instances
+
+
+def _attention_token_label(index: int, token: str, token_type: str) -> str:
+    type_code = {"text": "T", "latent": "L", "visual": "V"}.get(token_type, "?")
+    visible = token.replace("\n", "↵").replace(" ", "␠") or "∅"
+    if len(visible) > 15:
+        visible = visible[:12] + "…"
+    return f"{index} {type_code}:{visible}"
+
+
+def _build_token_attention_figure(
+    result: dict,
+    current_step: int,
+    layer_index: int | None = None,
+) -> go.Figure:
+    token_strings = result.get("token_strings", [])
+    token_types = result.get("token_types", [])
+    layer_attention = result.get("layer_attn_weights", [])
+    layer_count = len(layer_attention)
+    selected_layer = (
+        max(0, min(int(layer_index), layer_count - 1))
+        if layer_index is not None and layer_count
+        else layer_count - 1
+    )
+    attention_steps = layer_attention[selected_layer] if layer_count else []
+    prompt_length = 0
+    token_count = min(len(token_strings), len(token_types))
+
+    fig = go.Figure()
+    if token_count == 0 or not attention_steps:
+        fig.add_annotation(
+            text=(
+                "Run a new inference to inspect attention across decoder layers."
+                if not layer_attention
+                else "No generated-token attention was captured for this layer."
+            ),
+            x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False,
+            font=dict(color="#6b7e78", size=13),
+        )
+        fig.update_layout(template="plotly_white", margin=dict(l=30, r=20, t=30, b=30))
+        return fig
+
+    normalized, raw, history_mass = token_attn.generated_attention_matrix(
+        attention_steps, prompt_length, token_count
+    )
+    labels = [
+        _attention_token_label(i, token_strings[i], token_types[i])
+        for i in range(token_count)
+    ]
+    hover = np.empty((token_count, token_count), dtype=object)
+    hover[:] = ""
+    for query in range(token_count):
+        for source in range(query):
+            if np.isfinite(normalized[query, source]):
+                hover[query, source] = (
+                    f"query: {labels[query]}<br>source: {labels[source]}<br>"
+                    f"relative history attention: {normalized[query, source]:.2%}<br>"
+                    f"raw attention: {raw[query, source]:.6f}<br>"
+                    f"total generated-history mass: {history_mass[query]:.4f}"
+                )
+
+    indices = np.arange(token_count)
+    fig.add_trace(go.Heatmap(
+        z=normalized,
+        x=indices,
+        y=indices,
+        text=hover,
+        hovertemplate="%{text}<extra></extra>",
+        colorscale=[
+            [0.0, "#f8fafc"],
+            [0.15, "#fde68a"],
+            [0.45, "#fb923c"],
+            [1.0, "#9a3412"],
+        ],
+        zmin=0,
+        zmax=1,
+        colorbar=dict(title="Relative<br>attention", tickformat=".0%", thickness=14),
+        xgap=0.35,
+        ygap=0.35,
+    ))
+
+    selected_step = max(0, min(int(current_step or 0), token_count - 1))
+    fig.add_shape(
+        type="rect",
+        x0=-0.5,
+        x1=token_count - 0.5,
+        y0=selected_step - 0.5,
+        y1=selected_step + 0.5,
+        line=dict(color="#111827", width=2),
+        fillcolor="rgba(0,0,0,0)",
+    )
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#f4f7f5",
+        margin=dict(l=145, r=30, t=45, b=120),
+        xaxis=dict(
+            title="Attended-to generated token (source)",
+            tickmode="array", tickvals=indices, ticktext=labels,
+            tickangle=-55, tickfont=dict(size=9),
+            range=[-0.5, token_count - 0.5],
+        ),
+        yaxis=dict(
+            title="Generated token producing attention (query)",
+            tickmode="array", tickvals=indices, ticktext=labels,
+            tickfont=dict(size=9), autorange="reversed",
+        ),
+        annotations=[dict(
+            text=(
+                f"Selected row {selected_step} · generated-history attention mass "
+                f"{history_mass[selected_step]:.4f} · decoder layer {selected_layer}"
+            ),
+            x=0, y=1.08, xref="paper", yref="paper", showarrow=False,
+            xanchor="left", font=dict(size=11, color="#6b7e78"),
+        )],
+    )
+    return fig
+
 def _build_umap_figure(
     corpus: dict | None,
     instances: dict,
@@ -88,24 +253,8 @@ def _build_umap_figure(
     """Build the UMAP scatter figure with corpus background + instance trajectories."""
     fig = go.Figure()
     
-    if projection_mode == "tsne":
-        # Re-project corpus points with t-SNE instead of using raw UMAP coords
-        if corpus and corpus.get("coords"):
-            raw_coords = np.array(corpus["coords"])
-            tsne_coords, _ = proj.tsne_reproject(raw_coords, corpus["types"])
-            corpus = dict(corpus)          # shallow copy so we don't mutate the original
-            corpus["coords"] = tsne_coords.tolist()
-
-        # Re-project each instance's per-token coords too
-        new_instances = {}
-        for inst_id, inst_data in instances.items():
-            result = _result_from_serialisable(inst_data)
-            coords_2d = result.get("coords_2d")
-            if coords_2d is not None and len(coords_2d) >= 5:
-                tsne_coords, _ = proj.tsne_reproject(np.array(coords_2d), result.get("token_types", []))
-                result["coords_2d"] = tsne_coords
-            new_instances[inst_id] = _result_to_serialisable(result)
-        instances = new_instances
+    if projection_mode == "tsne" and corpus and corpus.get("coords"):
+        corpus, instances = _joint_tsne_projection(corpus, instances)
     
     fig.update_layout(
         template="plotly_white",
@@ -160,6 +309,7 @@ def _build_umap_figure(
             continue
         coords_2d = np.array(coords_2d)
         token_types = result.get("token_types", [])
+        token_strings = result.get("token_strings", [])
         is_active = inst_id == active_id
 
 
@@ -167,8 +317,12 @@ def _build_umap_figure(
             mask = [i for i, t in enumerate(token_types) if t == ttype]
             if not mask:
                 continue
-            sizes = [10 if i == current_step else 6 for i in mask]
+            sizes = [16 if i == current_step else (10 if is_active else 8) for i in mask]
             symbols = ["star" if i == current_step else "circle" for i in mask]
+            customdata = [
+                [inst_id, i, (token_strings[i] if i < len(token_strings) else "")]
+                for i in mask
+            ]
             fig.add_trace(go.Scattergl(
                 x=coords_2d[mask, 0], y=coords_2d[mask, 1],
                 mode="markers",
@@ -177,10 +331,18 @@ def _build_umap_figure(
                     size=sizes,
                     symbol=symbols,
                     opacity=0.9 if is_active else 0.5,
-                    line=dict(width=1, color="white") if is_active else dict(width=0),
+                    line=dict(width=2 if is_active else 1, color="#111827"),
                 ),
                 name=f"{inst_id}:{ttype}",
+                legendgroup=inst_id,
                 showlegend=True,
+                customdata=customdata,
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b> · " + ttype + "<br>"
+                    "step: %{customdata[1]}<br>"
+                    "token: %{customdata[2]}<br>"
+                    "(%{x:.2f}, %{y:.2f})<extra></extra>"
+                ),
             ))
 
         latent_idx = sorted([i for i, t in enumerate(token_types) if t == "latent"])
@@ -315,6 +477,7 @@ def register_callbacks(app):
             token_strings=np.array(result["token_strings"]),
             token_ids=np.array(result["token_ids"]),
             generated_text=result["generated_text"],
+            prompt_length=result["prompt_length"],
             image_grid_hw=np.array(result["image_grid_hw"]),
         )
 
@@ -330,12 +493,25 @@ def register_callbacks(app):
             attn_arr,
             allow_pickle=True,
         )
+        layer_attn_arr = np.empty(len(result["layer_attn_weights"]), dtype=object)
+        for layer_index, layer_steps in enumerate(result["layer_attn_weights"]):
+            step_arr = np.empty(len(layer_steps), dtype=object)
+            for step_index, weights in enumerate(layer_steps):
+                step_arr[step_index] = weights if weights is not None else np.array([])
+            layer_attn_arr[layer_index] = step_arr
+        np.save(
+            cache_dir / f"{inst_id}_layer_attn_weights.npy",
+            layer_attn_arr,
+            allow_pickle=True,
+        )
         if dl.umap_model_exists(model_name):
             try:
                 coords_2d = proj.project_onto_manifold(result["activations"], model_name)
                 result["coords_2d"] = coords_2d
-            except Exception:
+            except Exception as exc:
                 result["coords_2d"] = None
+                result["projection_error"] = str(exc)
+                print(f"[projection] {model_name}/{inst_id}: {exc}")
         else:
             result["coords_2d"] = None
 
@@ -395,14 +571,14 @@ def register_callbacks(app):
         else:
             heatmap_src = ""
 
-        fig = _build_umap_figure(corpus, instances, active_id, step, projection_mode)
-
         token_str = ""
         if step < len(result.get("token_strings", [])):
             token_str = result["token_strings"][step]
         token_type = ""
         if step < len(result.get("token_types", [])):
             token_type = result["token_types"][step]
+
+        fig = _build_umap_figure(corpus, instances, active_id, step, projection_mode)
 
         param_children = [
             _stat_row("Step",       str(step)),
@@ -412,11 +588,83 @@ def register_callbacks(app):
             _stat_row("Instance",   active_id),
             _stat_row("Projection", projection_mode or "umap"),
         ]
+        if result.get("projection_error"):
+            param_children.append(_stat_row("Projection error", result["projection_error"]))
 
         # ── Uncertainty (neighbour-preservation per token) ────────────────
         uncertainty_children = _build_uncertainty_display(result, step)
 
         return heatmap_src, fig, param_children, uncertainty_children
+
+    @app.callback(
+        Output("token-attention-matrix", "figure"),
+        Input("step-slider", "value"),
+        Input("attention-layer-slider", "value"),
+        Input("store-active-instance", "data"),
+        Input("store-instances", "data"),
+    )
+    def update_token_attention(step, layer_index, active_id, instances):
+        if not active_id or active_id not in instances:
+            return _build_token_attention_figure({}, step or 0, layer_index)
+        result = _result_from_serialisable(instances[active_id])
+        return _build_token_attention_figure(result, step or 0, layer_index)
+
+    @app.callback(
+        Output("attention-layer-slider", "max"),
+        Output("attention-layer-slider", "value"),
+        Output("attention-layer-slider", "marks"),
+        Input("store-active-instance", "data"),
+        State("store-instances", "data"),
+    )
+    def update_attention_layer_slider(active_id, instances):
+        result = instances.get(active_id, {}) if active_id else {}
+        layer_count = int(result.get("attention_layer_count", 0))
+        maximum = max(0, layer_count - 1)
+        if not layer_count:
+            return 0, 0, {0: "rerun"}
+        stride = max(1, maximum // 6)
+        marks = {i: str(i) for i in range(0, maximum + 1, stride)}
+        marks[maximum] = str(maximum)
+        return maximum, maximum, marks
+
+    @app.callback(
+        Output("attention-layer-slider", "value", allow_duplicate=True),
+        Output("attention-layer-interval", "disabled"),
+        Output("attention-layer-playback", "children"),
+        Output("attention-layer-playback", "title"),
+        Output("attention-layer-playback", "aria-label"),
+        Input("attention-layer-playback", "n_clicks"),
+        Input("attention-layer-interval", "n_intervals"),
+        Input("store-active-instance", "data"),
+        State("attention-layer-slider", "value"),
+        State("attention-layer-slider", "max"),
+        State("attention-layer-interval", "disabled"),
+        prevent_initial_call=True,
+    )
+    def control_attention_layer_playback(
+        n_clicks, n_intervals, active_id, current_layer, maximum_layer, disabled
+    ):
+        play_icon = html.Span(className="playback-icon playback-icon--play")
+        pause_icon = html.Span(className="playback-icon playback-icon--pause")
+
+        if ctx.triggered_id == "store-active-instance":
+            return no_update, True, play_icon, "Play decoder layers", "Play decoder layers"
+
+        maximum = int(maximum_layer or 0)
+        if ctx.triggered_id == "attention-layer-playback":
+            if not disabled:
+                return no_update, True, play_icon, "Play decoder layers", "Play decoder layers"
+            if maximum <= 0:
+                return 0, True, play_icon, "Play decoder layers", "Play decoder layers"
+            return 0, False, pause_icon, "Pause decoder layers", "Pause decoder layers"
+
+        if ctx.triggered_id == "attention-layer-interval" and not disabled:
+            next_layer = int(current_layer or 0) + 1
+            if next_layer >= maximum:
+                return maximum, True, play_icon, "Play decoder layers", "Play decoder layers"
+            return next_layer, False, pause_icon, "Pause decoder layers", "Pause decoder layers"
+
+        raise PreventUpdate
 
     @app.callback(
         Output("tsne-graph",    "figure"),
@@ -444,8 +692,13 @@ def register_callbacks(app):
 
         selected_indices = []
         for pt in selected_data["points"]:
-            if "pointIndex" in pt:
-                selected_indices.append(pt["pointIndex"])
+            customdata = pt.get("customdata")
+            if (
+                isinstance(customdata, (list, tuple))
+                and len(customdata) >= 2
+                and customdata[0] == active_id
+            ):
+                selected_indices.append(int(customdata[1]))
 
         if not selected_indices:
             raise PreventUpdate
@@ -560,8 +813,8 @@ def register_callbacks(app):
                 "tsne",
                 "secondary", True,
                 "primary", False,
-                "t-SNE Projection",
-                "Token embedding space — draw a box to zoom into a region",
+                "Joint t-SNE Re-layout",
+                "Shared t-SNE of corpus + live UMAP coordinates",
             )
 
 

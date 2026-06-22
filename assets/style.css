@@ -226,6 +226,18 @@ html, body {
   font-size: 0.72rem;
   margin-bottom: 14px;
 }
+
+.token-type-legend { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.token-type-chip {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+.token-type-chip--text   { color: #1d4ed8; background: #dbeafe; border-color: #93c5fd; }
+.token-type-chip--latent { color: #c2410c; background: #ffedd5; border-color: #fdba74; }
+.token-type-chip--visual { color: #15803d; background: #dcfce7; border-color: #86efac; }
 .panel-label {
   color: var(--text-secondary);
   font-size: 0.68rem;
@@ -300,6 +312,73 @@ html, body {
 .rc-slider-track        { background-color: var(--accent-gold) !important; }
 .rc-slider-handle       { border-color: var(--accent-gold) !important; }
 .rc-slider-handle:hover { border-color: var(--accent-dark) !important; }
+
+.attention-layer-control {
+    width: min(520px, 60vw);
+    margin-top: 14px;
+    padding: 10px 14px 4px;
+    border: 1px solid rgba(107, 126, 120, 0.22);
+    border-radius: 10px;
+    background: #f8faf9;
+}
+
+.attention-layer-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.attention-layer-label {
+    color: #465a54;
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.attention-layer-slider-wrap {
+    padding: 5px 3px 0;
+}
+
+.attention-layer-playback {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.attention-layer-playback:hover {
+    opacity: 0.7;
+    transform: scale(1.08);
+}
+
+.attention-layer-playback:focus-visible {
+    outline: 2px solid rgba(70, 90, 84, 0.35);
+    outline-offset: 2px;
+}
+
+.playback-icon--play {
+    width: 0;
+    height: 0;
+    margin-left: 2px;
+    border-top: 6px solid transparent;
+    border-bottom: 6px solid transparent;
+    border-left: 10px solid #465a54;
+}
+
+.playback-icon--pause {
+    width: 10px;
+    height: 12px;
+    border-left: 3px solid #465a54;
+    border-right: 3px solid #465a54;
+}
 
 
 .instance-list  { display: flex; flex-wrap: wrap; gap: 5px; }

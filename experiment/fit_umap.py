@@ -1,9 +1,11 @@
 import numpy as np
 import joblib
 import umap
+from sklearn.decomposition import PCA
+from sklearn.pipeline import make_pipeline
 from pathlib import Path
 
-ROOT = Path.home() / "VLM-Latent-Explorer"
+ROOT = Path(__file__).resolve().parents[1]
 PRECOMPUTED = ROOT / "precomputed"
 MODELS = ["qwen", "monet", "lvr"]
 
@@ -60,7 +62,14 @@ for model_name in MODELS:
     activations = np.concatenate(all_activations, axis=0)
     print(f"[{model_name}] Fitting UMAP on {activations.shape} ...")
 
-    reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
+    # Keeping all 3,584-dimensional training vectors inside UMAP creates ~1 GB
+    # artifacts. PCA preserves a learned out-of-sample transform while making
+    # the fitted UMAP small enough to load alongside a 7B checkpoint.
+    pca_dims = min(50, activations.shape[0], activations.shape[1])
+    reducer = make_pipeline(
+        PCA(n_components=pca_dims, svd_solver="randomized", random_state=42),
+        umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1),
+    )
     coords_2d = reducer.fit_transform(activations)  # shape: (N, 2)
 
     # Save the fitted model — used later to project NEW inference points
