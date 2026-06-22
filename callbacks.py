@@ -249,13 +249,17 @@ def _build_umap_figure(
     active_id: str | None,
     current_step: int,
     projection_mode: str = "umap",
+    highlight_mode: str = "all",
+    show_trace: bool = True,
+    corpus_visible_ids: list | None = None,
+    line_target: str = "__active__",
 ) -> go.Figure:
     """Build the UMAP scatter figure with corpus background + instance trajectories."""
     fig = go.Figure()
-    
+
     if projection_mode == "tsne" and corpus and corpus.get("coords"):
         corpus, instances = _joint_tsne_projection(corpus, instances)
-    
+
     fig.update_layout(
         template="plotly_white",
         paper_bgcolor="#ffffff",
@@ -266,95 +270,178 @@ def _build_umap_figure(
         uirevision="umap",
     )
 
+    # ── Unpack corpus arrays (always, so trajectory code can use them) ───────
+    corpus_coords = corpus_genidx = corpus_tokidx = corpus_example_ids = None
+    corpus_types = corpus_labels = None
     if corpus and corpus.get("coords"):
-        coords      = np.array(corpus["coords"])
-        types       = corpus["types"]
-        labels      = corpus.get("labels")
-        example_ids = corpus.get("example_ids")
-        genidx      = corpus.get("gen_index")
-        tokidx      = corpus.get("token_index")
-        have_meta = example_ids is not None and genidx is not None
+        corpus_coords      = np.array(corpus["coords"])
+        corpus_types       = corpus["types"]
+        corpus_labels      = corpus.get("labels")
+        corpus_example_ids = corpus.get("example_ids")
+        corpus_genidx      = corpus.get("gen_index")
+        corpus_tokidx      = corpus.get("token_index")
+
+    # Pre-compute sorted sequence for the corpus line_target example so
+    # highlight_mode="step" can trim it to current_step tokens.
+    highlighted_corpus_set: set[int] = set()
+    sorted_ex_mask: list[int] = []
+    if line_target != "__active__" and corpus_coords is not None and corpus_example_ids is not None:
+        def _seq_key(i: int) -> tuple:
+            gi = int(corpus_genidx[i]) if corpus_genidx is not None else 0
+            ti = int(corpus_tokidx[i]) if corpus_tokidx is not None else 0
+            return (1, gi) if gi >= 0 else (0, ti)
+        ex_all = [i for i, e in enumerate(corpus_example_ids) if str(e) == str(line_target)]
+        sorted_ex_mask = sorted(ex_all, key=_seq_key)
+        limit = current_step + 1 if highlight_mode == "step" else len(sorted_ex_mask)
+        highlighted_corpus_set = set(sorted_ex_mask[:limit])
+
+    # ── Corpus background ────────────────────────────────────────────────────
+    if corpus_coords is not None and corpus_visible_ids is not None and len(corpus_visible_ids) > 0:
+        visible_set = set(str(v) for v in corpus_visible_ids)
+        have_meta   = corpus_example_ids is not None and corpus_genidx is not None
 
         for ttype, color in TOKEN_COLORS.items():
-            mask = [i for i, t in enumerate(types) if t == ttype]
-            if not mask:
-                continue
-            tk = dict(
-                x=coords[mask, 0], y=coords[mask, 1],
-                mode="markers",
-                marker=dict(color=color, size=3, opacity=0.25),
-                name=f"corpus:{ttype}",
-                showlegend=True,
-            )
-            if have_meta:
-                cd = []
-                for i in mask:
-                    seq = f"gen {genidx[i]}" if genidx[i] >= 0 else \
-                          (f"input {tokidx[i]}" if tokidx else "input")
-                    lab = (labels[i] if labels else "").strip() or "·"
-                    cd.append([_passage(example_ids[i]), seq, lab])
-                tk["customdata"] = cd
-                tk["hovertemplate"] = (
-                    f"<b>Passage %{{customdata[0]}}</b> · {ttype}<br>"
-                    "seq: %{customdata[1]}<br>"
-                    "token: %{customdata[2]}<br>"
-                    "(%{x:.2f}, %{y:.2f})<extra></extra>"
+            # Split into highlighted (line_target) and background points
+            hi_mask  = []
+            bg_mask  = []
+            for i, t in enumerate(corpus_types):
+                if t != ttype:
+                    continue
+                eid = str(corpus_example_ids[i]) if corpus_example_ids is not None else None
+                if eid not in visible_set:
+                    continue
+                if eid == str(line_target) and i in highlighted_corpus_set:
+                    hi_mask.append(i)
+                else:
+                    bg_mask.append(i)
+
+            def _make_corpus_trace(mask, size, opacity, name):
+                tk = dict(
+                    x=corpus_coords[mask, 0], y=corpus_coords[mask, 1],
+                    mode="markers",
+                    marker=dict(color=color, size=size, opacity=opacity,
+                                line=dict(width=1 if size > 4 else 0, color="#111827")),
+                    name=name,
+                    legendgroup=f"corpus:{ttype}",
+                    showlegend=(size <= 4),
                 )
-            fig.add_trace(go.Scattergl(**tk))
+                if have_meta:
+                    cd = []
+                    for i in mask:
+                        gi  = corpus_genidx[i]
+                        seq = f"gen {gi}" if gi >= 0 else \
+                              (f"input {corpus_tokidx[i]}" if corpus_tokidx is not None else "input")
+                        lab = (corpus_labels[i] if corpus_labels else "").strip() or "·"
+                        cd.append([_passage(corpus_example_ids[i]), seq, lab])
+                    tk["customdata"] = cd
+                    tk["hovertemplate"] = (
+                        f"<b>Passage %{{customdata[0]}}</b> · {ttype}<br>"
+                        "seq: %{customdata[1]}<br>"
+                        "token: %{customdata[2]}<br>"
+                        "(%{x:.2f}, %{y:.2f})<extra></extra>"
+                    )
+                return tk
 
-    for idx, (inst_id, inst_data) in enumerate(instances.items()):
-        result = _result_from_serialisable(inst_data)
-        coords_2d = result.get("coords_2d")
-        if coords_2d is None or len(coords_2d) == 0:
-            continue
-        coords_2d = np.array(coords_2d)
-        token_types = result.get("token_types", [])
-        token_strings = result.get("token_strings", [])
-        is_active = inst_id == active_id
+            if bg_mask:
+                fig.add_trace(go.Scattergl(**_make_corpus_trace(
+                    bg_mask, size=3, opacity=0.25, name=f"corpus:{ttype}")))
+            if hi_mask:
+                fig.add_trace(go.Scattergl(**_make_corpus_trace(
+                    hi_mask, size=8, opacity=0.85, name=f"corpus:{ttype}:highlight")))
 
-
-        for ttype, color in TOKEN_COLORS.items():
-            mask = [i for i, t in enumerate(token_types) if t == ttype]
-            if not mask:
+    # ── Instance traces ──────────────────────────────────────────────────────
+    if show_trace:
+        for idx, (inst_id, inst_data) in enumerate(instances.items()):
+            result = _result_from_serialisable(inst_data)
+            coords_2d = result.get("coords_2d")
+            if coords_2d is None or len(coords_2d) == 0:
                 continue
-            sizes = [16 if i == current_step else (10 if is_active else 8) for i in mask]
-            symbols = ["star" if i == current_step else "circle" for i in mask]
-            customdata = [
-                [inst_id, i, (token_strings[i] if i < len(token_strings) else "")]
-                for i in mask
-            ]
-            fig.add_trace(go.Scattergl(
-                x=coords_2d[mask, 0], y=coords_2d[mask, 1],
-                mode="markers",
-                marker=dict(
-                    color=color,
-                    size=sizes,
-                    symbol=symbols,
-                    opacity=0.9 if is_active else 0.5,
-                    line=dict(width=2 if is_active else 1, color="#111827"),
-                ),
-                name=f"{inst_id}:{ttype}",
-                legendgroup=inst_id,
-                showlegend=True,
-                customdata=customdata,
-                hovertemplate=(
-                    "<b>%{customdata[0]}</b> · " + ttype + "<br>"
-                    "step: %{customdata[1]}<br>"
-                    "token: %{customdata[2]}<br>"
-                    "(%{x:.2f}, %{y:.2f})<extra></extra>"
-                ),
-            ))
+            coords_2d    = np.array(coords_2d)
+            token_types  = result.get("token_types", [])
+            token_strings = result.get("token_strings", [])
+            is_active = inst_id == active_id
 
-        latent_idx = sorted([i for i, t in enumerate(token_types) if t == "latent"])
-        if latent_idx:
-            lc = coords_2d[latent_idx]
-            dash = INSTANCE_LINE_STYLES[idx % len(INSTANCE_LINE_STYLES)]
+            # Highlight only when active instance is the line target
+            if line_target == "__active__" and is_active:
+                if highlight_mode == "step":
+                    highlighted = set(range(current_step + 1))
+                else:
+                    highlighted = set(range(len(token_types)))
+            else:
+                highlighted = set()  # dim — not the current line/highlight target
+
+            for ttype, color in TOKEN_COLORS.items():
+                mask = [i for i, t in enumerate(token_types) if t == ttype]
+                if not mask:
+                    continue
+                is_highlighted = bool(highlighted)
+                sizes    = [16 if i == current_step and is_highlighted else
+                             (10 if i in highlighted else 5) for i in mask]
+                opacities = [0.95 if i in highlighted else
+                              (0.4 if is_active else 0.2) for i in mask]
+                symbols  = ["star" if i == current_step and is_highlighted
+                             else "circle" for i in mask]
+                customdata = [
+                    [inst_id, i, (token_strings[i] if i < len(token_strings) else "")]
+                    for i in mask
+                ]
+                fig.add_trace(go.Scattergl(
+                    x=coords_2d[mask, 0], y=coords_2d[mask, 1],
+                    mode="markers",
+                    marker=dict(
+                        color=color,
+                        size=sizes,
+                        symbol=symbols,
+                        opacity=opacities,
+                        line=dict(width=2 if is_active else 1, color="#111827"),
+                    ),
+                    name=f"{inst_id}:{ttype}",
+                    legendgroup=inst_id,
+                    showlegend=True,
+                    customdata=customdata,
+                    hovertemplate=(
+                        "<b>%{customdata[0]}</b> · " + ttype + "<br>"
+                        "step: %{customdata[1]}<br>"
+                        "token: %{customdata[2]}<br>"
+                        "(%{x:.2f}, %{y:.2f})<extra></extra>"
+                    ),
+                ))
+
+    # ── Trajectory line ──────────────────────────────────────────────────────
+    if line_target == "__active__" and active_id and active_id in instances:
+        result    = _result_from_serialisable(instances[active_id])
+        coords_2d = result.get("coords_2d")
+        if coords_2d is not None and len(coords_2d) > 0:
+            coords_2d   = np.array(coords_2d)
+            token_types  = result.get("token_types", [])
+            inst_idx     = list(instances.keys()).index(active_id)
+            dash         = INSTANCE_LINE_STYLES[inst_idx % len(INSTANCE_LINE_STYLES)]
+            for ttype, color in TOKEN_COLORS.items():
+                traj_idx = sorted([i for i, t in enumerate(token_types)
+                                   if t == ttype and i <= current_step])
+                if len(traj_idx) < 2:
+                    continue
+                lc = coords_2d[traj_idx]
+                fig.add_trace(go.Scatter(
+                    x=lc[:, 0], y=lc[:, 1],
+                    mode="lines",
+                    line=dict(color=color, dash=dash, width=2),
+                    name=f"line:{ttype}",
+                    legendgroup="line",
+                    showlegend=False,
+                ))
+
+    elif line_target != "__active__" and sorted_ex_mask:
+        limit = current_step + 1 if highlight_mode == "step" else len(sorted_ex_mask)
+        traj  = sorted_ex_mask[:limit]
+        if len(traj) >= 2:
+            lc = corpus_coords[traj]
             fig.add_trace(go.Scatter(
                 x=lc[:, 0], y=lc[:, 1],
                 mode="lines",
-                line=dict(color=TOKEN_COLORS["latent"], dash=dash, width=2),
-                name=f"{inst_id}:trajectory",
-                showlegend=True,
+                line=dict(color="#8b5cf6", dash="solid", width=2),
+                name=f"line:passage {_passage(line_target)}",
+                showlegend=False,
             ))
 
     return fig
@@ -538,6 +625,57 @@ def register_callbacks(app):
         )
 
     @app.callback(
+        Output("umap-line-target", "options"),
+        Input("store-corpus-embeddings", "data"),
+    )
+    def update_line_target_options(corpus):
+        opts = [{"label": "Current trace", "value": "__active__"}]
+        if corpus and corpus.get("example_ids"):
+            seen: dict = {}
+            for eid in corpus["example_ids"]:
+                key = str(eid)
+                if key not in seen:
+                    seen[key] = True
+                    opts.append({"label": f"Passage {_passage(eid)}", "value": key})
+        return opts
+
+    @app.callback(
+        Output("corpus-passage-dropdown", "options"),
+        Output("corpus-passage-dropdown", "value"),
+        Input("store-corpus-embeddings",  "data"),
+    )
+    def init_corpus_passages(corpus):
+        opts = []
+        if corpus and corpus.get("example_ids"):
+            seen: dict = {}
+            for eid in corpus["example_ids"]:
+                key = str(eid)
+                if key not in seen:
+                    seen[key] = True
+                    opts.append({"label": f"Passage {_passage(eid)}", "value": key})
+        return opts, [o["value"] for o in opts]
+
+    @app.callback(
+        Output("corpus-passage-dropdown", "value", allow_duplicate=True),
+        Input("btn-corpus-all",  "n_clicks"),
+        Input("btn-corpus-none", "n_clicks"),
+        State("corpus-passage-dropdown", "options"),
+        prevent_initial_call=True,
+    )
+    def handle_corpus_buttons(n_all, n_none, options):
+        if ctx.triggered_id == "btn-corpus-all":
+            return [o["value"] for o in (options or [])]
+        return []
+
+    @app.callback(
+        Output("corpus-selection-count",  "children"),
+        Input("corpus-passage-dropdown",  "value"),
+        State("corpus-passage-dropdown",  "options"),
+    )
+    def update_corpus_count(selected, options):
+        return f"{len(selected or [])} of {len(options or [])}"
+
+    @app.callback(
         Output("heatmap-image",       "src"),
         Output("umap-graph",          "figure"),
         Output("param-display",       "children"),
@@ -545,13 +683,19 @@ def register_callbacks(app):
         Input("step-slider",            "value"),
         Input("store-active-instance",  "data"),
         Input("store-active-projection","data"),
+        Input("highlight-mode",         "value"),
+        Input("umap-show-trace",        "value"),
+        Input("corpus-passage-dropdown","value"),
+        Input("umap-line-target",       "value"),
         State("store-instances",        "data"),
         State("store-corpus-embeddings","data"),
         State("store-current-image-b64","data"),
         State("model-selector",         "value"),
         prevent_initial_call=True,
     )
-    def update_views(step, active_id, projection_mode, instances, corpus, img_b64, model_name):
+    def update_views(step, active_id, projection_mode, highlight_mode,
+                     show_trace_val, corpus_visible_ids, line_target,
+                     instances, corpus, img_b64, model_name):
         if not active_id or active_id not in instances:
             raise PreventUpdate
 
@@ -578,7 +722,13 @@ def register_callbacks(app):
         if step < len(result.get("token_types", [])):
             token_type = result["token_types"][step]
 
-        fig = _build_umap_figure(corpus, instances, active_id, step, projection_mode)
+        fig = _build_umap_figure(
+            corpus, instances, active_id, step, projection_mode,
+            highlight_mode=highlight_mode or "all",
+            show_trace="trace" in (show_trace_val or []),
+            corpus_visible_ids=corpus_visible_ids or [],
+            line_target=line_target or "__active__",
+        )
 
         param_children = [
             _stat_row("Step",       str(step)),
@@ -670,20 +820,22 @@ def register_callbacks(app):
         Output("tsne-graph",    "figure"),
         Output("stats-display", "children"),
         Input("umap-graph",     "selectedData"),
+        Input("highlight-mode", "value"),
         State("store-active-instance", "data"),
         State("store-instances",        "data"),
         State("step-slider",            "value"),
         prevent_initial_call=True,
     )
-    def update_tsne(selected_data, active_id, instances, step):
+    def update_tsne(selected_data, highlight_mode, active_id, instances, step):
         if not selected_data or not selected_data.get("points"):
             raise PreventUpdate
         if not active_id or active_id not in instances:
             raise PreventUpdate
 
         result = _result_from_serialisable(instances[active_id])
-        coords_2d   = result.get("coords_2d")
-        token_types = result.get("token_types", [])
+        coords_2d    = result.get("coords_2d")
+        token_types  = result.get("token_types", [])
+        token_strings = result.get("token_strings", [])
 
         if coords_2d is None:
             raise PreventUpdate
@@ -709,6 +861,10 @@ def register_callbacks(app):
 
         tsne_coords, _ = proj.tsne_reproject(selected_coords, selected_types)
 
+        # Which original indices count as "highlighted" based on highlight_mode
+        highlighted = set(selected_indices if highlight_mode == "all" else
+                          [i for i in selected_indices if i <= step])
+
         fig = go.Figure()
         fig.update_layout(
             template="plotly_white",
@@ -717,14 +873,33 @@ def register_callbacks(app):
             margin=dict(l=10, r=10, t=10, b=10),
         )
         for ttype, color in TOKEN_COLORS.items():
-            mask = [i for i, t in enumerate(selected_types) if t == ttype]
+            mask = [j for j, t in enumerate(selected_types) if t == ttype]
             if not mask:
                 continue
+            orig_indices = [selected_indices[j] for j in mask]
+            sizes    = [12 if orig_indices[k] in highlighted else 6  for k in range(len(mask))]
+            opacities = [0.95 if orig_indices[k] in highlighted else 0.35 for k in range(len(mask))]
+            customdata = [
+                [orig_indices[k], token_strings[orig_indices[k]] if orig_indices[k] < len(token_strings) else ""]
+                for k in range(len(mask))
+            ]
             fig.add_trace(go.Scatter(
                 x=tsne_coords[mask, 0], y=tsne_coords[mask, 1],
                 mode="markers",
-                marker=dict(color=color, size=7),
+                marker=dict(
+                    color=color,
+                    size=sizes,
+                    opacity=opacities,
+                    line=dict(width=1, color="#111827"),
+                ),
                 name=ttype,
+                customdata=customdata,
+                hovertemplate=(
+                    "<b>" + ttype + "</b><br>"
+                    "step: %{customdata[0]}<br>"
+                    "token: %{customdata[1]}<br>"
+                    "(%{x:.2f}, %{y:.2f})<extra></extra>"
+                ),
             ))
 
         attn_list = result.get("attn_weights", [])

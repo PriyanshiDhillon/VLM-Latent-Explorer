@@ -513,3 +513,16 @@ html, body {
 
 
 .preview-img { max-width: 100%; border-radius: 10px; margin-bottom: 8px; }
+
+/* Corpus passage dropdown: suppress value tags in collapsed bar so only
+   the placeholder shows, while open-list checkmarks still work normally */
+.corpus-passage-dropdown .Select-value {
+  display: none !important;
+}
+.corpus-passage-dropdown .Select-placeholder {
+  display: block !important;
+}
+.corpus-passage-dropdown .Select-control {
+  cursor: pointer;
+}
+
