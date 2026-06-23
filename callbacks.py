@@ -19,7 +19,7 @@ import io
 import json
 import numpy as np
 from pathlib import Path
-from dash import Input, Output, State, callback, ctx, html, no_update, ALL
+from dash import Input, Output, Patch, State, callback, ctx, html, no_update, ALL
 from dash.exceptions import PreventUpdate
 from PIL import Image
 
@@ -247,14 +247,17 @@ def _build_umap_figure(
     corpus: dict | None,
     instances: dict,
     active_id: str | None,
-    current_step: int,
     projection_mode: str = "umap",
     highlight_mode: str = "all",
     show_trace: bool = True,
     corpus_visible_ids: list | None = None,
     line_target: str = "__active__",
-) -> go.Figure:
-    """Build the UMAP scatter figure with corpus background + instance trajectories."""
+) -> tuple[go.Figure, dict]:
+    """Build the UMAP base figure (no step-dependent elements).
+
+    Returns (fig, trace_info). Step-specific overlays (star marker, trajectory
+    line tail) are added separately by update_umap_step via Patch().
+    """
     fig = go.Figure()
 
     if projection_mode == "tsne" and corpus and corpus.get("coords"):
@@ -270,7 +273,7 @@ def _build_umap_figure(
         uirevision="umap",
     )
 
-    # ── Unpack corpus arrays (always, so trajectory code can use them) ───────
+    # ── Unpack corpus arrays ─────────────────────────────────────────────────
     corpus_coords = corpus_genidx = corpus_tokidx = corpus_example_ids = None
     corpus_types = corpus_labels = None
     if corpus and corpus.get("coords"):
@@ -281,9 +284,8 @@ def _build_umap_figure(
         corpus_genidx      = corpus.get("gen_index")
         corpus_tokidx      = corpus.get("token_index")
 
-    # Pre-compute sorted sequence for the corpus line_target example so
-    # highlight_mode="step" can trim it to current_step tokens.
-    highlighted_corpus_set: set[int] = set()
+    # Pre-compute sorted sequence for corpus line_target (step-trimming is
+    # handled in update_umap_step; here we show ALL highlighted points).
     sorted_ex_mask: list[int] = []
     if line_target != "__active__" and corpus_coords is not None and corpus_example_ids is not None:
         def _seq_key(i: int) -> tuple:
@@ -292,8 +294,8 @@ def _build_umap_figure(
             return (1, gi) if gi >= 0 else (0, ti)
         ex_all = [i for i, e in enumerate(corpus_example_ids) if str(e) == str(line_target)]
         sorted_ex_mask = sorted(ex_all, key=_seq_key)
-        limit = current_step + 1 if highlight_mode == "step" else len(sorted_ex_mask)
-        highlighted_corpus_set = set(sorted_ex_mask[:limit])
+
+    highlighted_corpus_set = set(sorted_ex_mask)
 
     # ── Corpus background ────────────────────────────────────────────────────
     if corpus_coords is not None and corpus_visible_ids is not None and len(corpus_visible_ids) > 0:
@@ -301,7 +303,6 @@ def _build_umap_figure(
         have_meta   = corpus_example_ids is not None and corpus_genidx is not None
 
         for ttype, color in TOKEN_COLORS.items():
-            # Split into highlighted (line_target) and background points
             hi_mask  = []
             bg_mask  = []
             for i, t in enumerate(corpus_types):
@@ -350,37 +351,35 @@ def _build_umap_figure(
                     hi_mask, size=8, opacity=0.85, name=f"corpus:{ttype}:highlight")))
 
     # ── Instance traces ──────────────────────────────────────────────────────
+    # Uniform appearance — no step-specific star/size. update_umap_step patches these.
+    active_type_traces: dict[str, dict] = {}
     if show_trace:
         for idx, (inst_id, inst_data) in enumerate(instances.items()):
             result = _result_from_serialisable(inst_data)
             coords_2d = result.get("coords_2d")
             if coords_2d is None or len(coords_2d) == 0:
                 continue
-            coords_2d    = np.array(coords_2d)
-            token_types  = result.get("token_types", [])
+            coords_2d     = np.array(coords_2d)
+            token_types   = result.get("token_types", [])
             token_strings = result.get("token_strings", [])
-            is_active = inst_id == active_id
-
-            # Highlight only when active instance is the line target
-            if line_target == "__active__" and is_active:
-                if highlight_mode == "step":
-                    highlighted = set(range(current_step + 1))
-                else:
-                    highlighted = set(range(len(token_types)))
-            else:
-                highlighted = set()  # dim — not the current line/highlight target
+            is_active     = inst_id == active_id
 
             for ttype, color in TOKEN_COLORS.items():
                 mask = [i for i, t in enumerate(token_types) if t == ttype]
                 if not mask:
                     continue
-                is_highlighted = bool(highlighted)
-                sizes    = [16 if i == current_step and is_highlighted else
-                             (10 if i in highlighted else 5) for i in mask]
-                opacities = [0.95 if i in highlighted else
-                              (0.4 if is_active else 0.2) for i in mask]
-                symbols  = ["star" if i == current_step and is_highlighted
-                             else "circle" for i in mask]
+
+                if is_active:
+                    sizes     = [10] * len(mask)
+                    opacities = [0.95] * len(mask)
+                else:
+                    sizes     = [5] * len(mask)
+                    opacities = [0.2] * len(mask)
+
+                trace_idx = len(fig.data)
+                if is_active:
+                    active_type_traces[ttype] = {"idx": trace_idx, "mask": mask}
+
                 customdata = [
                     [inst_id, i, (token_strings[i] if i < len(token_strings) else "")]
                     for i in mask
@@ -391,7 +390,7 @@ def _build_umap_figure(
                     marker=dict(
                         color=color,
                         size=sizes,
-                        symbol=symbols,
+                        symbol="circle",
                         opacity=opacities,
                         line=dict(width=2 if is_active else 1, color="#111827"),
                     ),
@@ -407,44 +406,144 @@ def _build_umap_figure(
                     ),
                 ))
 
-    # ── Trajectory line ──────────────────────────────────────────────────────
-    if line_target == "__active__" and active_id and active_id in instances:
-        result    = _result_from_serialisable(instances[active_id])
-        coords_2d = result.get("coords_2d")
-        if coords_2d is not None and len(coords_2d) > 0:
-            coords_2d   = np.array(coords_2d)
-            token_types  = result.get("token_types", [])
-            inst_idx     = list(instances.keys()).index(active_id)
-            dash         = INSTANCE_LINE_STYLES[inst_idx % len(INSTANCE_LINE_STYLES)]
-            for ttype, color in TOKEN_COLORS.items():
-                traj_idx = sorted([i for i, t in enumerate(token_types)
-                                   if t == ttype and i <= current_step])
-                if len(traj_idx) < 2:
-                    continue
-                lc = coords_2d[traj_idx]
-                fig.add_trace(go.Scatter(
-                    x=lc[:, 0], y=lc[:, 1],
-                    mode="lines",
-                    line=dict(color=color, dash=dash, width=2),
-                    name=f"line:{ttype}",
-                    legendgroup="line",
-                    showlegend=False,
-                ))
+    # ── Step-overlay placeholder traces (filled by update_umap_step) ─────────
+    traj_start_idx = len(fig.data)
+    for ttype, color in TOKEN_COLORS.items():
+        fig.add_trace(go.Scatter(
+            x=[], y=[],
+            mode="lines",
+            line=dict(color=color, dash="solid", width=2),
+            name=f"traj:{ttype}",
+            legendgroup="trajectory",
+            showlegend=False,
+        ))
 
-    elif line_target != "__active__" and sorted_ex_mask:
-        limit = current_step + 1 if highlight_mode == "step" else len(sorted_ex_mask)
-        traj  = sorted_ex_mask[:limit]
+    # Corpus trajectory: pre-filled with full path; step callback trims when needed
+    corpus_traj_idx = len(fig.data)
+    if sorted_ex_mask and corpus_coords is not None and len(sorted_ex_mask) >= 2:
+        lc = corpus_coords[sorted_ex_mask]
+        fig.add_trace(go.Scatter(
+            x=lc[:, 0].tolist(), y=lc[:, 1].tolist(),
+            mode="lines",
+            line=dict(color="#8b5cf6", dash="solid", width=2),
+            name=f"line:passage {_passage(line_target)}",
+            showlegend=False,
+        ))
+    else:
+        fig.add_trace(go.Scatter(
+            x=[], y=[],
+            mode="lines",
+            line=dict(color="#8b5cf6", dash="solid", width=2),
+            name="traj:corpus",
+            showlegend=False,
+        ))
+
+    # Current-step star marker (position filled by update_umap_step)
+    star_idx = len(fig.data)
+    fig.add_trace(go.Scattergl(
+        x=[], y=[],
+        mode="markers",
+        marker=dict(symbol="star", size=16, color="white",
+                    line=dict(width=2.5, color="#111827")),
+        name="current-step",
+        showlegend=False,
+        hoverinfo="skip",
+    ))
+
+    traj_indices = {ttype: traj_start_idx + i for i, ttype in enumerate(TOKEN_COLORS)}
+    trace_info = {
+        "active_id":      active_id,
+        "type_traces":    active_type_traces,
+        "traj_indices":   traj_indices,
+        "corpus_traj_idx": corpus_traj_idx,
+        "star_idx":       star_idx,
+        "sorted_ex_mask": sorted_ex_mask,
+        "line_target":    line_target,
+    }
+    return fig, trace_info
+
+
+def _build_step_patch(
+    step: int,
+    trace_info: dict,
+    instances: dict,
+    active_id: str,
+    highlight_mode: str,
+    corpus: dict | None = None,
+) -> Patch:
+    """Return a Patch() that updates only the step-sensitive UMAP overlay traces."""
+    patched = Patch()
+
+    result    = _result_from_serialisable(instances[active_id])
+    coords_2d = result.get("coords_2d")
+    token_types = result.get("token_types", [])
+
+    if coords_2d is None:
+        return patched
+
+    coords_2d = np.array(coords_2d)
+    step      = int(step or 0)
+    inst_idx  = list(instances.keys()).index(active_id)
+    dash      = INSTANCE_LINE_STYLES[inst_idx % len(INSTANCE_LINE_STYLES)]
+
+    # Instance trajectory lines
+    for ttype, traj_fig_idx in trace_info.get("traj_indices", {}).items():
+        if highlight_mode == "step":
+            traj_mask = sorted([i for i, t in enumerate(token_types) if t == ttype and i <= step])
+        else:
+            traj_mask = sorted([i for i, t in enumerate(token_types) if t == ttype])
+
+        if len(traj_mask) >= 2:
+            lc = coords_2d[traj_mask]
+            patched["data"][traj_fig_idx]["x"] = lc[:, 0].tolist()
+            patched["data"][traj_fig_idx]["y"] = lc[:, 1].tolist()
+            patched["data"][traj_fig_idx]["line"]["dash"] = dash
+        else:
+            patched["data"][traj_fig_idx]["x"] = []
+            patched["data"][traj_fig_idx]["y"] = []
+
+    # Corpus trajectory: trim to current step when highlight_mode == "step"
+    corpus_traj_idx = trace_info.get("corpus_traj_idx")
+    sorted_ex_mask  = trace_info.get("sorted_ex_mask", [])
+    line_target     = trace_info.get("line_target", "__active__")
+    if (corpus_traj_idx is not None and line_target != "__active__"
+            and sorted_ex_mask and highlight_mode == "step"
+            and corpus and corpus.get("coords")):
+        corpus_coords = np.array(corpus["coords"])
+        traj = sorted_ex_mask[: step + 1]
         if len(traj) >= 2:
             lc = corpus_coords[traj]
-            fig.add_trace(go.Scatter(
-                x=lc[:, 0], y=lc[:, 1],
-                mode="lines",
-                line=dict(color="#8b5cf6", dash="solid", width=2),
-                name=f"line:passage {_passage(line_target)}",
-                showlegend=False,
-            ))
+            patched["data"][corpus_traj_idx]["x"] = lc[:, 0].tolist()
+            patched["data"][corpus_traj_idx]["y"] = lc[:, 1].tolist()
+        else:
+            patched["data"][corpus_traj_idx]["x"] = []
+            patched["data"][corpus_traj_idx]["y"] = []
 
-    return fig
+    # Star marker at current step
+    star_idx = trace_info.get("star_idx")
+    if star_idx is not None:
+        if step < len(token_types):
+            patched["data"][star_idx]["x"] = [float(coords_2d[step, 0])]
+            patched["data"][star_idx]["y"] = [float(coords_2d[step, 1])]
+            patched["data"][star_idx]["marker"]["color"] = TOKEN_COLORS.get(token_types[step], "#ffffff")
+        else:
+            patched["data"][star_idx]["x"] = []
+            patched["data"][star_idx]["y"] = []
+
+    # Dim/reveal tokens for highlight_mode == "step"
+    if highlight_mode == "step":
+        highlighted = set(range(step + 1))
+        for ttype, tinfo in trace_info.get("type_traces", {}).items():
+            tidx = tinfo["idx"]
+            mask = tinfo["mask"]
+            patched["data"][tidx]["marker"]["opacity"] = [
+                0.95 if m in highlighted else 0.4 for m in mask
+            ]
+            patched["data"][tidx]["marker"]["size"] = [
+                10 if m in highlighted else 5 for m in mask
+            ]
+
+    return patched
 
 
 # ── Callbacks ────────────────────────────────────────────────────────────────
@@ -461,6 +560,8 @@ def register_callbacks(app):
     def preview_image(contents):
         if not contents:
             raise PreventUpdate
+        img = _b64_to_pil(contents)
+        print(f"[image-upload] Uploaded image size: {img.width}x{img.height} px")
         return contents, {"display": "block"}, contents
 
     @app.callback(
@@ -500,6 +601,7 @@ def register_callbacks(app):
     def load_model_on_click(n_clicks, model_name):
         if not model_name:
             return "No model selected.", 0, {"display": "none"}
+        print(f"[load-model] Loading model: {model_name}")
         current = inf.get_loaded_model()
         if current and current != model_name:
             inf.unload_model(current)
@@ -540,13 +642,14 @@ def register_callbacks(app):
         Output("reasoning-trace",       "children"),
         Output("instance-list",         "children"),
         Input("run-btn", "n_clicks"),
-        State("store-current-image-b64", "data"),
-        State("question-input",          "value"),
-        State("model-selector",          "value"),
-        State("store-instances",         "data"),
+        State("store-current-image-b64",   "data"),
+        State("question-input",            "value"),
+        State("model-selector",            "value"),
+        State("store-instances",           "data"),
+        State("store-corpus-embeddings",   "data"),
         prevent_initial_call=True,
     )
-    def run_inference(n_clicks, img_b64, question, model_name, existing_instances):
+    def run_inference(n_clicks, img_b64, question, model_name, existing_instances, corpus):
         if not model_name or not img_b64 or not question:
             raise PreventUpdate
 
@@ -602,6 +705,20 @@ def register_callbacks(app):
         else:
             result["coords_2d"] = None
 
+        # For each latent token, find the nearest text token in UMAP space
+        nearest_text: list = [None] * len(result["token_types"])
+        if result.get("coords_2d") is not None and corpus and corpus.get("coords") and corpus.get("labels"):
+            corpus_coords_arr = np.array(corpus["coords"], dtype=np.float32)
+            latent_indices = [i for i, t in enumerate(result["token_types"]) if t == "latent"]
+            if latent_indices:
+                latent_coords = result["coords_2d"][np.array(latent_indices)]
+                neighbors = proj.find_nearest_text_neighbors(
+                    latent_coords, corpus_coords_arr, corpus["types"], corpus["labels"]
+                )
+                for idx, neighbor in zip(latent_indices, neighbors):
+                    nearest_text[idx] = neighbor
+        result["nearest_text"] = nearest_text
+
        # inst_id = f"instance_{len(existing_instances) + 1}"
         updated_instances = dict(existing_instances)
         serialisable = _result_to_serialisable(
@@ -611,7 +728,7 @@ def register_callbacks(app):
         n_steps = len(result["token_strings"])
         marks = {i: str(i) for i in range(0, n_steps, max(1, n_steps // 10))}
 
-        trace_children = _build_reasoning_trace(result["token_strings"], result["token_types"])
+        trace_children = _build_reasoning_trace(result["token_strings"], result["token_types"], result.get("nearest_text"))
         instance_children = _build_instance_list(updated_instances, inst_id)
 
         return (
@@ -677,25 +794,17 @@ def register_callbacks(app):
 
     @app.callback(
         Output("heatmap-image",       "src"),
-        Output("umap-graph",          "figure"),
         Output("param-display",       "children"),
         Output("uncertainty-display", "children"),
-        Input("step-slider",            "value"),
-        Input("store-active-instance",  "data"),
-        Input("store-active-projection","data"),
-        Input("highlight-mode",         "value"),
-        Input("umap-show-trace",        "value"),
-        Input("corpus-passage-dropdown","value"),
-        Input("umap-line-target",       "value"),
-        State("store-instances",        "data"),
-        State("store-corpus-embeddings","data"),
-        State("store-current-image-b64","data"),
-        State("model-selector",         "value"),
+        Input("step-slider",           "value"),
+        Input("store-active-instance", "data"),
+        State("store-instances",           "data"),
+        State("store-active-projection",   "data"),
+        State("store-current-image-b64",   "data"),
+        State("model-selector",            "value"),
         prevent_initial_call=True,
     )
-    def update_views(step, active_id, projection_mode, highlight_mode,
-                     show_trace_val, corpus_visible_ids, line_target,
-                     instances, corpus, img_b64, model_name):
+    def update_views(step, active_id, instances, projection_mode, img_b64, model_name):
         if not active_id or active_id not in instances:
             raise PreventUpdate
 
@@ -722,12 +831,11 @@ def register_callbacks(app):
         if step < len(result.get("token_types", [])):
             token_type = result["token_types"][step]
 
-        fig = _build_umap_figure(
-            corpus, instances, active_id, step, projection_mode,
-            highlight_mode=highlight_mode or "all",
-            show_trace="trace" in (show_trace_val or []),
-            corpus_visible_ids=corpus_visible_ids or [],
-            line_target=line_target or "__active__",
+        nearest_text_list = result.get("nearest_text", [])
+        nearest_at_step = (
+            nearest_text_list[step]
+            if nearest_text_list and step < len(nearest_text_list)
+            else None
         )
 
         param_children = [
@@ -738,13 +846,67 @@ def register_callbacks(app):
             _stat_row("Instance",   active_id),
             _stat_row("Projection", projection_mode or "umap"),
         ]
+        if nearest_at_step:
+            label = nearest_at_step["label"].strip() or nearest_at_step["label"]
+            param_children.insert(3, _stat_row("Nearest text", f'"{label}" (d={nearest_at_step["distance"]:.2f})'))
         if result.get("projection_error"):
             param_children.append(_stat_row("Projection error", result["projection_error"]))
 
-        # ── Uncertainty (neighbour-preservation per token) ────────────────
         uncertainty_children = _build_uncertainty_display(result, step)
+        print(f"[heatmap] Attention heatmap rendered for step={step}, instance={active_id}")
 
-        return heatmap_src, fig, param_children, uncertainty_children
+        return heatmap_src, param_children, uncertainty_children
+
+    @app.callback(
+        Output("umap-graph",      "figure"),
+        Output("store-umap-base", "data"),
+        Input("store-active-instance",   "data"),
+        Input("store-active-projection", "data"),
+        Input("highlight-mode",          "value"),
+        Input("umap-show-trace",         "value"),
+        Input("corpus-passage-dropdown", "value"),
+        Input("umap-line-target",        "value"),
+        State("store-instances",         "data"),
+        State("store-corpus-embeddings", "data"),
+        prevent_initial_call=True,
+    )
+    def update_umap_base(active_id, projection_mode, highlight_mode, show_trace_val,
+                         corpus_visible_ids, line_target, instances, corpus):
+        if not active_id or active_id not in instances:
+            raise PreventUpdate
+
+        fig, trace_info = _build_umap_figure(
+            corpus, instances, active_id, projection_mode,
+            highlight_mode=highlight_mode or "all",
+            show_trace="trace" in (show_trace_val or []),
+            corpus_visible_ids=corpus_visible_ids or [],
+            line_target=line_target or "__active__",
+        )
+        print(f"[umap] UMAP graph rendered: mode={projection_mode}, instance={active_id}, traces={len(fig.data)}")
+        return fig, trace_info
+
+    @app.callback(
+        Output("umap-graph", "figure", allow_duplicate=True),
+        Input("step-slider",     "value"),
+        Input("store-umap-base", "data"),
+        State("store-instances",          "data"),
+        State("store-active-instance",    "data"),
+        State("highlight-mode",           "value"),
+        State("store-corpus-embeddings",  "data"),
+        prevent_initial_call=True,
+    )
+    def update_umap_step(step, trace_info, instances, active_id, highlight_mode, corpus):
+        if not trace_info or not active_id or not instances:
+            raise PreventUpdate
+        if active_id not in instances:
+            raise PreventUpdate
+        if trace_info.get("active_id") != active_id:
+            raise PreventUpdate
+
+        return _build_step_patch(
+            step or 0, trace_info, instances, active_id,
+            highlight_mode or "all", corpus,
+        )
 
     @app.callback(
         Output("token-attention-matrix", "figure"),
@@ -757,7 +919,9 @@ def register_callbacks(app):
         if not active_id or active_id not in instances:
             return _build_token_attention_figure({}, step or 0, layer_index)
         result = _result_from_serialisable(instances[active_id])
-        return _build_token_attention_figure(result, step or 0, layer_index)
+        fig = _build_token_attention_figure(result, step or 0, layer_index)
+        print(f"[token-attention] Token attention matrix rendered: step={step}, layer={layer_index}, instance={active_id}")
+        return fig
 
     @app.callback(
         Output("attention-layer-slider", "max"),
@@ -817,100 +981,86 @@ def register_callbacks(app):
         raise PreventUpdate
 
     @app.callback(
-        Output("tsne-graph",    "figure"),
+        Output("token-context-panel", "children"),
+        Input("step-slider",            "value"),
+        Input("store-active-instance",  "data"),
+        State("store-instances",        "data"),
+        State("store-corpus-embeddings","data"),
+        prevent_initial_call=True,
+    )
+    def update_token_context(step, active_id, instances, corpus):
+        if not active_id or active_id not in instances:
+            raise PreventUpdate
+
+        result = _result_from_serialisable(instances[active_id])
+        coords_2d     = result.get("coords_2d")
+        token_strings = result.get("token_strings", [])
+        token_types   = result.get("token_types", [])
+
+        step = int(step or 0)
+        current_token = token_strings[step] if step < len(token_strings) else ""
+        current_type  = token_types[step]   if step < len(token_types)   else "text"
+
+        neighbors = []
+        if (coords_2d is not None and corpus
+                and corpus.get("coords") and corpus.get("labels")):
+            query_coord      = np.array(coords_2d)[step]
+            corpus_coords_arr = np.array(corpus["coords"], dtype=np.float32)
+            neighbors = proj.find_k_nearest_text_neighbors(
+                query_coord,
+                corpus_coords_arr,
+                corpus["types"],
+                corpus["labels"],
+                corpus_example_ids=corpus.get("example_ids"),
+                k=10,
+            )
+
+        print(f"[token-context] Nearest corpus neighbours rendered: "
+              f"step={step}, instance={active_id}, found={len(neighbors)}")
+        return _build_token_context_panel(current_token, current_type, neighbors)
+
+    @app.callback(
         Output("stats-display", "children"),
         Input("umap-graph",     "selectedData"),
         Input("highlight-mode", "value"),
         State("store-active-instance", "data"),
-        State("store-instances",        "data"),
-        State("step-slider",            "value"),
+        State("store-instances",       "data"),
+        State("step-slider",           "value"),
         prevent_initial_call=True,
     )
-    def update_tsne(selected_data, highlight_mode, active_id, instances, step):
+    def update_stats(selected_data, highlight_mode, active_id, instances, step):
         if not selected_data or not selected_data.get("points"):
             raise PreventUpdate
         if not active_id or active_id not in instances:
             raise PreventUpdate
 
-        result = _result_from_serialisable(instances[active_id])
-        coords_2d    = result.get("coords_2d")
-        token_types  = result.get("token_types", [])
-        token_strings = result.get("token_strings", [])
+        result      = _result_from_serialisable(instances[active_id])
+        token_types = result.get("token_types", [])
+        coords_2d   = result.get("coords_2d")
 
-        if coords_2d is None:
-            raise PreventUpdate
-
-        coords_2d = np.array(coords_2d)
-
-        selected_indices = []
-        for pt in selected_data["points"]:
-            customdata = pt.get("customdata")
-            if (
-                isinstance(customdata, (list, tuple))
-                and len(customdata) >= 2
-                and customdata[0] == active_id
-            ):
-                selected_indices.append(int(customdata[1]))
-
+        selected_indices = [
+            int(pt["customdata"][1])
+            for pt in selected_data["points"]
+            if isinstance(pt.get("customdata"), (list, tuple))
+            and len(pt["customdata"]) >= 2
+            and pt["customdata"][0] == active_id
+        ]
         if not selected_indices:
             raise PreventUpdate
 
-        selected_indices = [i for i in selected_indices if i < len(coords_2d)]
-        selected_coords  = coords_2d[selected_indices]
-        selected_types   = [token_types[i] for i in selected_indices if i < len(token_types)]
+        if coords_2d is not None:
+            n = len(coords_2d)
+            selected_indices = [i for i in selected_indices if i < n]
 
-        tsne_coords, _ = proj.tsne_reproject(selected_coords, selected_types)
+        selected_types = [token_types[i] for i in selected_indices if i < len(token_types)]
 
-        # Which original indices count as "highlighted" based on highlight_mode
-        highlighted = set(selected_indices if highlight_mode == "all" else
-                          [i for i in selected_indices if i <= step])
-
-        fig = go.Figure()
-        fig.update_layout(
-            template="plotly_white",
-            paper_bgcolor="#ffffff",
-            plot_bgcolor="#f4f7f5",
-            margin=dict(l=10, r=10, t=10, b=10),
-        )
-        for ttype, color in TOKEN_COLORS.items():
-            mask = [j for j, t in enumerate(selected_types) if t == ttype]
-            if not mask:
-                continue
-            orig_indices = [selected_indices[j] for j in mask]
-            sizes    = [12 if orig_indices[k] in highlighted else 6  for k in range(len(mask))]
-            opacities = [0.95 if orig_indices[k] in highlighted else 0.35 for k in range(len(mask))]
-            customdata = [
-                [orig_indices[k], token_strings[orig_indices[k]] if orig_indices[k] < len(token_strings) else ""]
-                for k in range(len(mask))
-            ]
-            fig.add_trace(go.Scatter(
-                x=tsne_coords[mask, 0], y=tsne_coords[mask, 1],
-                mode="markers",
-                marker=dict(
-                    color=color,
-                    size=sizes,
-                    opacity=opacities,
-                    line=dict(width=1, color="#111827"),
-                ),
-                name=ttype,
-                customdata=customdata,
-                hovertemplate=(
-                    "<b>" + ttype + "</b><br>"
-                    "step: %{customdata[0]}<br>"
-                    "token: %{customdata[1]}<br>"
-                    "(%{x:.2f}, %{y:.2f})<extra></extra>"
-                ),
-            ))
-
-        attn_list = result.get("attn_weights", [])
+        attn_list    = result.get("attn_weights", [])
         attn_at_step = None
         if attn_list and step < len(attn_list) and attn_list[step] is not None:
             attn_at_step = np.array(attn_list[step])
 
         stats = proj.compute_selection_stats(selected_types, attn_at_step, [])
-        stats_children = [_stat_row(k, str(v)) for k, v in stats.items()]
-
-        return fig, stats_children
+        return [_stat_row(k, str(v)) for k, v in stats.items()]
 
     @app.callback(
         Output("store-active-instance", "data", allow_duplicate=True),
@@ -940,6 +1090,7 @@ def register_callbacks(app):
         trace = _build_reasoning_trace(
             result.get("token_strings", []),
             result.get("token_types", []),
+            result.get("nearest_text"),
         )
         badges = _build_instance_list(instances, active_id)
         return trace, badges
@@ -995,17 +1146,80 @@ def register_callbacks(app):
 
 # ── UI helpers ───────────────────────────────────────────────────────────────
 
-def _build_reasoning_trace(token_strings: list[str], token_types: list[str]):
+def _build_token_context_panel(current_token: str, current_type: str, neighbors: list) -> html.Div:
+    """Build the token-context neighbour panel for the current step."""
+    token_display = repr(current_token) if current_token else "–"
+    if len(token_display) > 40:
+        token_display = token_display[:38] + "…'"
+
+    header = html.Div([
+        html.Span("Current token: ", className="stat-label"),
+        html.Span(token_display, className=f"trace-token trace-token--{current_type}"),
+    ], className="stat-row", style={"marginBottom": "10px"})
+
+    if not neighbors:
+        return html.Div([
+            header,
+            html.Div(
+                "No corpus data — run the offline pipeline to enable neighbour lookup.",
+                style={"color": "#9ca3af", "fontStyle": "italic", "fontSize": "0.78rem"},
+            ),
+        ])
+
+    max_dist = max((n["distance"] for n in neighbors), default=1) or 1
+
+    rows = []
+    for rank, neighbor in enumerate(neighbors, 1):
+        label = neighbor["label"].strip() or neighbor["label"] or "·"
+        if len(label) > 35:
+            label = label[:33] + "…"
+        dist        = neighbor["distance"]
+        example_id  = neighbor.get("example_id")
+        passage_num = _passage(example_id) if example_id is not None else "?"
+        bar_pct     = max(4, int((1.0 - dist / max_dist) * 100))
+
+        rows.append(html.Div([
+            html.Span(str(rank), className="neighbor-rank"),
+            html.Div([
+                html.Div([
+                    html.Span(f'"{label}"', className="neighbor-label"),
+                    html.Span(f"P{passage_num}", className="neighbor-passage"),
+                    html.Span(f"d={dist:.2f}", className="neighbor-dist"),
+                ], className="neighbor-meta"),
+                html.Div(
+                    html.Div(style={
+                        "width": f"{bar_pct}%",
+                        "height": "3px",
+                        "background": "#3b82f6",
+                        "borderRadius": "2px",
+                    }),
+                    className="neighbor-bar-bg",
+                ),
+            ], className="neighbor-content"),
+        ], className="neighbor-row"))
+
+    return html.Div([header, html.Div(rows, className="neighbor-list")])
+
+
+def _build_reasoning_trace(token_strings: list[str], token_types: list[str], nearest_text: list | None = None):
     """Build clickable token spans for the reasoning trace panel."""
     from dash import html
     spans = []
     for i, (tok, ttype) in enumerate(zip(token_strings, token_types)):
+        nt = nearest_text[i] if nearest_text and i < len(nearest_text) else None
+        title = f"Step {i} | {ttype}"
+        if ttype == "latent" and nt:
+            label = nt["label"].strip() or nt["label"]
+            title += f" | ≈{label} (d={nt['distance']:.2f})"
+            children: list = [tok, html.Span(f"≈{label}", className="nearest-text-hint")]
+        else:
+            children = [tok]
         spans.append(
             html.Span(
-                tok,
+                children,
                 id={"type": "trace-token", "index": i},
                 className=f"trace-token trace-token--{ttype}",
-                title=f"Step {i} | {ttype}",
+                title=title,
             )
         )
     return spans

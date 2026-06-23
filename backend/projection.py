@@ -106,3 +106,82 @@ def compute_selection_stats(
         stats["accuracy"] = f"{sum(correct_flags)}/{len(correct_flags)}"
 
     return stats
+
+
+def find_k_nearest_text_neighbors(
+    query_coord: np.ndarray,
+    corpus_coords: np.ndarray,
+    corpus_types: list[str],
+    corpus_labels: list[str],
+    corpus_example_ids: list | None = None,
+    k: int = 10,
+) -> list[dict]:
+    """Return the k nearest corpus text tokens to a single 2D query point."""
+    from scipy.spatial import cKDTree
+
+    text_indices = [i for i, t in enumerate(corpus_types) if t == "text"]
+    if not text_indices or query_coord is None:
+        return []
+
+    text_coords = corpus_coords[np.array(text_indices)]
+    text_labels = [corpus_labels[i] for i in text_indices]
+    text_eids = (
+        [corpus_example_ids[i] for i in text_indices]
+        if corpus_example_ids is not None
+        else [None] * len(text_indices)
+    )
+
+    k = min(k, len(text_indices))
+    tree = cKDTree(text_coords)
+    distances, indices = tree.query(
+        query_coord.reshape(1, -1).astype(np.float64), k=k
+    )
+    distances = np.atleast_2d(distances)[0]
+    indices = np.atleast_2d(indices)[0]
+
+    return [
+        {
+            "label": text_labels[int(idx)],
+            "distance": float(dist),
+            "example_id": text_eids[int(idx)],
+        }
+        for idx, dist in zip(indices, distances)
+    ]
+
+
+def find_nearest_text_neighbors(
+    query_coords: np.ndarray,
+    corpus_coords: np.ndarray,
+    corpus_types: list[str],
+    corpus_labels: list[str],
+) -> list[dict | None]:
+    """
+    For each query point, return the nearest corpus point of type 'text'.
+
+    Parameters
+    ----------
+    query_coords  : (K, 2) 2D UMAP coordinates of the tokens to look up
+    corpus_coords : (N, 2) 2D UMAP coordinates of the full corpus
+    corpus_types  : length-N token type per corpus point
+    corpus_labels : length-N token string per corpus point
+
+    Returns
+    -------
+    list of length K — {"label": str, "distance": float} or None per entry
+    """
+    from scipy.spatial import cKDTree
+
+    text_indices = [i for i, t in enumerate(corpus_types) if t == "text"]
+    if not text_indices or len(query_coords) == 0:
+        return [None] * len(query_coords)
+
+    text_coords = corpus_coords[np.array(text_indices)]
+    text_labels = [corpus_labels[i] for i in text_indices]
+
+    tree = cKDTree(text_coords)
+    distances, indices = tree.query(query_coords.astype(np.float64), k=1)
+
+    return [
+        {"label": text_labels[int(idx)], "distance": float(dist)}
+        for idx, dist in zip(indices, distances)
+    ]
