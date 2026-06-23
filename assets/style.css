@@ -526,3 +526,97 @@ html, body {
   cursor: pointer;
 }
 
+/* Nearest-text hint shown inside latent token spans in the reasoning trace */
+.nearest-text-hint {
+  font-size: 0.65em;
+  font-style: italic;
+  opacity: 0.72;
+  margin-left: 2px;
+  letter-spacing: 0;
+}
+
+
+/* ── Token context panel ──────────────────────────────────────────────────── */
+.token-context-panel {
+  font-size: 0.78rem;
+}
+
+.neighbor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.neighbor-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 7px;
+  background: #f8faf9;
+  border: 1px solid #e8eeeb;
+  transition: background 0.1s;
+}
+.neighbor-row:hover { background: #f0f6f2; }
+
+.neighbor-rank {
+  flex-shrink: 0;
+  width: 18px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #9ca3af;
+  text-align: right;
+  padding-top: 1px;
+}
+
+.neighbor-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.neighbor-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.neighbor-label {
+  color: #1a2e28;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.neighbor-passage {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #ffffff;
+  background: #2d4a3e;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.neighbor-dist {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  color: #9ca3af;
+  font-family: monospace;
+}
+
+.neighbor-bar-bg {
+  width: 100%;
+  height: 3px;
+  background: #e0e8e4;
+  border-radius: 2px;
+  overflow: hidden;
+}
+

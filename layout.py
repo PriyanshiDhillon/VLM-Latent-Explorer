@@ -403,30 +403,19 @@ def row_two() -> dbc.Row:
     ])
 
 
-# ── Row 3: Zoom / detail panel + Stats ───────────────────────────────────────
+# ── Row 3: Token context + Stats ─────────────────────────────────────────────
 def row_three() -> dbc.Row:
     return dbc.Row(className="g-3", children=[
 
-        # ── ZOOM DETAIL (re-projection of selected box) ───────────────────
+        # ── TOKEN CONTEXT PANEL ───────────────────────────────────────────
         dbc.Col(width=6, children=[
             html.Div(className="content-card", children=[
-                html.Div("Zoom — Selected Region", className="content-card-title"),
+                html.Div("Token Context — Nearest Corpus Neighbours", className="content-card-title"),
                 html.Div(
-                    "Re-projection of the bounding-box selection above (highlight follows UMAP setting)",
+                    "10 closest corpus text tokens to the current step in UMAP space",
                     className="content-card-subtitle",
                 ),
-                dcc.Graph(
-                    id="tsne-graph",
-                    style={"height": "320px"},
-                    figure={
-                        "data": [],
-                        "layout": {
-                            "template":      "plotly_white",
-                            "paper_bgcolor": "#ffffff",
-                            "plot_bgcolor":  "#f4f7f5",
-                        },
-                    },
-                ),
+                html.Div(id="token-context-panel", className="token-context-panel"),
             ]),
         ]),
 
@@ -478,5 +467,6 @@ def build_layout() -> html.Div:
             dcc.Store(id="store-corpus-embeddings", data={}),
             dcc.Store(id="store-current-image-b64", data=None),
             dcc.Store(id="store-active-projection", data="umap"),
+            dcc.Store(id="store-umap-base",         data=None),
         ],
     )
