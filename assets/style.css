@@ -620,3 +620,67 @@ html, body {
   overflow: hidden;
 }
 
+
+/* ── Causal intervention ──────────────────────────────────────────────────── */
+.intervention-sublabel {
+  color: #a78bfa;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  margin: 10px 0 4px;
+  padding-left: 10px;
+  font-weight: 600;
+}
+
+.intervention-hint {
+  color: rgba(255,255,255,0.45);
+  font-size: 0.68rem;
+  margin-bottom: 5px;
+  padding-left: 2px;
+}
+
+.intervention-btn {
+  background: #7c3aed !important;
+  border: none !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
+  border-radius: 12px !important;
+  font-size: 0.88rem !important;
+  padding: 10px !important;
+  box-shadow: 0 4px 14px rgba(124,58,237,0.35);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.intervention-btn:hover {
+  background: #6d28d9 !important;
+  box-shadow: 0 4px 18px rgba(124,58,237,0.5);
+}
+
+/* Intervention instance badges */
+.intervention-badge {
+  background: rgba(124,58,237,0.25) !important;
+  border-color: rgba(124,58,237,0.5) !important;
+}
+.intervention-badge.active-badge {
+  background: #7c3aed !important;
+  border-color: #7c3aed !important;
+  color: #ffffff !important;
+}
+
+/* ── Uncertainty strip ────────────────────────────────────────────────────── */
+.uncertainty-display { min-height: 18px; }
+.uncertainty-bar-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 4px 0;
+}
+.uncertainty-token {
+  width: 18px;
+  display: flex;
+  align-items: center;
+  opacity: 0.7;
+  cursor: default;
+  transition: opacity 0.1s;
+}
+.uncertainty-token--active { opacity: 1; }
+
