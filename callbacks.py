@@ -101,7 +101,7 @@ def _execute_inference_and_update(
     )
     inst_id = f"{instance_prefix}_{len(existing_instances) + 1}"
 
-    cache_dir = Path("precomputed/online_cache") / model_name
+    cache_dir = dl.PRECOMPUTED_DIR / "online_cache" / model_name
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     np.savez(
@@ -131,12 +131,17 @@ def _execute_inference_and_update(
     if dl.umap_model_exists(model_name):
         try:
             result["coords_2d"] = proj.project_onto_manifold(result["activations"], model_name)
+            result["trustworthiness_scores"] = proj.compute_neighborhood_preservation_scores(
+                result["activations"], result["coords_2d"]
+            )
         except Exception as exc:
             result["coords_2d"] = None
+            result["trustworthiness_scores"] = None
             result["projection_error"] = str(exc)
             print(f"[projection] {model_name}/{inst_id}: {exc}")
     else:
         result["coords_2d"] = None
+        result["trustworthiness_scores"] = None
 
     nearest_text: list = [None] * len(result["token_types"])
     if result.get("coords_2d") is not None and corpus and corpus.get("coords") and corpus.get("labels"):
@@ -192,6 +197,21 @@ def _result_from_serialisable(result: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def _load_online_cache_activations(model_name: str | None, instance_id: str | None) -> np.ndarray | None:
+    if not model_name or not instance_id:
+        return None
+
+    cache_path = dl.PRECOMPUTED_DIR / "online_cache" / model_name / f"{instance_id}.npz"
+    if not cache_path.exists():
+        return None
+
+    try:
+        with np.load(cache_path, allow_pickle=True) as data:
+            return np.array(data["activations"])
+    except Exception:
+        return None
 
 def _passage(example_id):
     """Map an example id like 'example_000007' to a 1-based passage number (8)."""
@@ -1155,8 +1175,76 @@ def register_callbacks(app):
         if attn_list and step < len(attn_list) and attn_list[step] is not None:
             attn_at_step = np.array(attn_list[step])
 
-        stats = proj.compute_selection_stats(selected_types, attn_at_step, [])
-        return [_stat_row(k, str(v)) for k, v in stats.items()]
+        trust_scores = result.get("trustworthiness_scores")
+
+        stats = proj.compute_selection_stats(
+            selected_types,
+            attn_at_step,
+            [],
+            selection_indices=selected_indices,
+            trust_scores=trust_scores,
+        )
+
+        # Map internal metric keys → human-friendly labels for the website.
+        label_map = {
+            # counts
+            "total_points": "Total points",
+            "text_count": "Text count",
+            "visual_count": "Visual count",
+            "latent_count": "Latent count",
+            "text_pct": "Text %",
+            "visual_pct": "Visual %",
+            "latent_pct": "Latent %",
+
+            # attention entropy (overall)
+            "attention_entropy_mean": "Attention entropy (mean)",
+            "attention_entropy_std": "Attention entropy (std)",
+
+            # attention entropy (by type)
+            "text_attention_entropy_mean": "Attention entropy (text mean)",
+            "text_attention_entropy_std": "Attention entropy (text std)",
+            "text_attention_entropy_min": "Attention entropy (text min)",
+            "text_attention_entropy_max": "Attention entropy (text max)",
+
+            "latent_attention_entropy_mean": "Attention entropy (latent mean)",
+            "latent_attention_entropy_std": "Attention entropy (latent std)",
+            "latent_attention_entropy_min": "Attention entropy (latent min)",
+            "latent_attention_entropy_max": "Attention entropy (latent max)",
+
+            # nearest-corpus distance
+            "mean_nearest_corpus_text_distance": "Mean nearest-corpus text distance",
+            "nearest_corpus_text_distance_std": "Nearest-corpus text distance (std)",
+            "nearest_corpus_text_distance_min": "Nearest-corpus text distance (min)",
+            "nearest_corpus_text_distance_max": "Nearest-corpus text distance (max)",
+            "text_mean_nearest_corpus_text_distance": "Text mean nearest-corpus text distance",
+            "latent_mean_nearest_corpus_text_distance": "Latent mean nearest-corpus text distance",
+
+            # projection dispersion / preservation
+            "selection_activation_pairwise_distance_mean": "Selection activation pairwise distance (mean)",
+            "selection_activation_pairwise_distance_std": "Selection activation pairwise distance (std)",
+            "selection_activation_pairwise_distance_min": "Selection activation pairwise distance (min)",
+            "selection_activation_pairwise_distance_max": "Selection activation pairwise distance (max)",
+
+            "selection_projection_pairwise_distance_mean": "Selection 2D projection pairwise distance (mean)",
+            "selection_projection_pairwise_distance_std": "Selection 2D projection pairwise distance (std)",
+            "selection_projection_pairwise_distance_min": "Selection 2D projection pairwise distance (min)",
+            "selection_projection_pairwise_distance_max": "Selection 2D projection pairwise distance (max)",
+            "selection_projection_to_activation_distance_ratio": "2D/activation distance ratio",
+
+            # trustworthiness
+            "mean_trustworthiness": "Mean uncertainty",
+            "median_trustworthiness": "Median uncertainty",
+            "trustworthiness_std": "Uncertainty (std)",
+        }
+
+        # Render all metrics; unknown keys fall back to their original name.
+        rows = []
+        for k, v in stats.items():
+            display_label = label_map.get(k, k)
+            rows.append(_stat_row(display_label, str(v)))
+        return rows
+
+
 
     @app.callback(
         Output("store-active-instance", "data", allow_duplicate=True),
@@ -1500,16 +1588,37 @@ def _build_uncertainty_display(result: dict, current_step: int):
     scores = result.get("trustworthiness_scores")   # list[float] | None
     token_types = result.get("token_types", [])
 
-    if not scores:
+    if scores is None or len(scores) == 0:
         return html.Div(
             "Uncertainty scores not available for this run.",
             className="stat-row",
             style={"color": "#9ca3af", "fontStyle": "italic"},
         )
 
+    scores = [float(score) for score in scores]
+    selected_score = scores[current_step] if 0 <= current_step < len(scores) else None
+    mean_score = float(np.mean(scores))
+    summary = html.Div(
+        [
+            html.Span(
+                f"Current: {selected_score:.2f}"
+                if selected_score is not None
+                else "Current: n/a"
+            ),
+            html.Span(f"Mean: {mean_score:.2f}", style={"marginLeft": "16px"}),
+        ],
+        className="stat-row",
+        title="Fraction of nearest neighbours preserved after projection to 2D.",
+    )
+
     items = []
     for i, (score, ttype) in enumerate(zip(scores, token_types)):
-        color = TOKEN_COLORS.get(ttype, "#6b7280")
+        if score >= 0.75:
+            color = "#22c55e"
+        elif score >= 0.5:
+            color = "#f59e0b"
+        else:
+            color = "#ef4444"
         is_current = i == current_step
         bar_width = f"{max(4, int(score * 100))}%"
         items.append(
@@ -1518,7 +1627,7 @@ def _build_uncertainty_display(result: dict, current_step: int):
                     "uncertainty-token uncertainty-token--active"
                     if is_current else "uncertainty-token"
                 ),
-                title=f"Step {i} | {ttype} | trust={score:.2f}",
+                title=f"Step {i} | {ttype} | neighbour preservation={score:.2f}",
                 children=[
                     html.Div(
                         style={
@@ -1533,4 +1642,6 @@ def _build_uncertainty_display(result: dict, current_step: int):
                 ],
             )
         )
-    return html.Div(items, className="uncertainty-bar-strip")
+    return html.Div(
+        [summary, html.Div(items, className="uncertainty-bar-strip")]
+    )
