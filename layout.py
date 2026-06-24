@@ -125,6 +125,10 @@ def sidebar() -> html.Div:
 
             # ── CAUSAL INTERVENTION ───────────────────────────────────────
             html.Div("Causal Intervention", className="sidebar-label"),
+            html.Div(
+                "Answer text can read question text, generated latent tokens, and answer history, but not image patches.",
+                className="intervention-hint",
+            ),
 
             html.Div("Modified Question", className="intervention-sublabel"),
             dbc.Textarea(
@@ -164,7 +168,7 @@ def sidebar() -> html.Div:
             ),
 
             dbc.Button(
-                "▶  Run Intervention",
+                "▶  Run Latent Bottleneck",
                 id="run-intervention-btn",
                 className="intervention-btn w-100 mb-3",
                 n_clicks=0,

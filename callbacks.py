@@ -87,12 +87,18 @@ def _execute_inference_and_update(
     corpus: dict,
     instance_prefix: str = "instance",
     mask_region: dict | None = None,
+    attention_intervention: str | None = None,
 ) -> tuple:
     """Run inference and package results; shared by Run Inference and Run Intervention."""
     if mask_region:
         image = _apply_image_mask(image, mask_region)
 
-    result = inf.run_inference(image, question, model_name)
+    result = inf.run_inference(
+        image,
+        question,
+        model_name,
+        attention_intervention=attention_intervention,
+    )
     inst_id = f"{instance_prefix}_{len(existing_instances) + 1}"
 
     cache_dir = Path("precomputed/online_cache") / model_name
@@ -147,6 +153,8 @@ def _execute_inference_and_update(
 
     if mask_region:
         result["mask_region"] = mask_region
+    if attention_intervention:
+        result["attention_intervention"] = attention_intervention
 
     updated = dict(existing_instances)
     updated[inst_id] = _result_to_serialisable(
@@ -1230,6 +1238,7 @@ def register_callbacks(app):
                 existing_instances, corpus or {},
                 instance_prefix="intervention",
                 mask_region=mask_region,
+                attention_intervention="question_latent_answer_bottleneck",
             )
         return trace_children, updated, inst_id, max_step, val, marks, instance_children
 

@@ -105,12 +105,52 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
     """Qwen2.5-VL whose decode loop feeds final-layer states back as inputs."""
 
     latent_decoding: Optional[LatentDecodingSpec] = None
+    latent_attention_intervention: Optional[dict] = None
 
     def configure_latent_decoding(self, protocol: str) -> None:
         self.latent_decoding = latent_decoding_spec(self, protocol)
         # Continuous one-position feedback requires an incremental KV cache.
         self.config.use_cache = True
         self.generation_config.use_cache = True
+
+    def _apply_latent_bottleneck_mask(
+        self,
+        model_inputs: dict,
+        input_ids: torch.Tensor,
+        generated_latent_mask: list[bool],
+        generated_answer_mask: list[bool],
+    ) -> None:
+        """Restrict answer-token queries to question text + latents + answer history."""
+        cfg = self.latent_attention_intervention
+        if not cfg or cfg.get("mode") != "question_latent_answer_bottleneck":
+            return
+        attention_mask = model_inputs.get("attention_mask")
+        if attention_mask is None or attention_mask.ndim != 2:
+            return
+
+        prompt_length = int(cfg["prompt_length"])
+        image_start, image_end = cfg["image_token_range"]
+        seq_len = input_ids.shape[1]
+        if seq_len <= prompt_length:
+            return
+
+        allowed = torch.zeros(
+            (seq_len,), dtype=attention_mask.dtype, device=attention_mask.device
+        )
+        allowed[:prompt_length] = 1
+        # Block direct access to image patch tokens. The surrounding vision
+        # boundary/control tokens remain visible because they carry structure,
+        # not image patch content.
+        allowed[int(image_start):int(image_end)] = 0
+
+        generated_count = min(seq_len - prompt_length, len(generated_latent_mask))
+        for i in range(generated_count):
+            if generated_latent_mask[i] or generated_answer_mask[i]:
+                allowed[prompt_length + i] = 1
+
+        restricted = torch.ones_like(attention_mask)
+        restricted[:, :seq_len] = allowed[None, :]
+        model_inputs["attention_mask"] = restricted
 
     def _sample(
         self,
@@ -154,6 +194,10 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
         this_peer_finished = False
         prefill_consumed = False
         state = LatentDecodeState(spec)
+        generated_latent_mask: list[bool] = []
+        generated_answer_mask: list[bool] = []
+        latent_span_seen = False
+        latent_span_complete = False
 
         # Force hidden-state production because it is the next latent input.
         generation_config.output_hidden_states = True
@@ -176,6 +220,13 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
                 if state.active:
                     model_inputs["input_ids"] = None
                     model_inputs["inputs_embeds"] = state.pending_embedding[:, None, :]
+                if latent_span_complete:
+                    self._apply_latent_bottleneck_mask(
+                        model_inputs,
+                        input_ids,
+                        generated_latent_mask,
+                        generated_answer_mask,
+                    )
                 model_inputs["output_hidden_states"] = True
                 with self._optimize_model_for_decode():
                     outputs = self(**model_inputs, return_dict=True)
@@ -211,6 +262,19 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
 
             emitted_id = state.advance(int(next_tokens.item()), current_hidden)
             next_tokens = torch.tensor([emitted_id], device=input_ids.device)
+            was_inside_latent_span = latent_span_seen and not latent_span_complete
+            emitted_is_latent = (
+                was_inside_latent_span
+                or emitted_id == spec.start_id
+                or emitted_id == spec.placeholder_id
+                or emitted_id == spec.end_id
+            )
+            if emitted_id == spec.start_id:
+                latent_span_seen = True
+            if latent_span_seen and emitted_id == spec.end_id and not state.active:
+                latent_span_complete = True
+            generated_latent_mask.append(bool(emitted_is_latent))
+            generated_answer_mask.append(bool(latent_span_complete and not emitted_is_latent))
 
             input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
             if streamer is not None:

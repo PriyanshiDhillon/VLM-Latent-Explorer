@@ -215,6 +215,7 @@ def run_inference(
     question: str,
     model_name: str,
     max_new_tokens: int = 512,
+    attention_intervention: Optional[str] = None,
     prefix_ids: Optional[list[int]] = None,
     prefix_activations: Optional[list[np.ndarray]] = None,
     prefix_attn: Optional[list[np.ndarray]] = None,
@@ -229,6 +230,7 @@ def run_inference(
     question        : user question string
     model_name      : 'qwen' | 'monet' | 'lvr'
     max_new_tokens  : generation budget
+    attention_intervention : optional causal attention intervention mode
     prefix_ids      : if set, prepend these token ids (for edited-instance continuation)
     prefix_activations : activations from the prefix (editing case)
     prefix_attn        : attention weights from the prefix (editing case)
@@ -295,18 +297,38 @@ def run_inference(
     store = ActivationStore(prompt_length=input_len)
     _register_hooks(model, store)
 
+    if attention_intervention:
+        if model_name == "qwen" or not hasattr(model, "latent_attention_intervention"):
+            store.remove_hooks()
+            raise ValueError(
+                "Latent attention interventions require Monet or LVR; "
+                "the baseline Qwen model has no generated visual latent tokens."
+            )
+        if attention_intervention != "question_latent_answer_bottleneck":
+            store.remove_hooks()
+            raise ValueError(f"Unknown attention intervention: {attention_intervention}")
+        model.latent_attention_intervention = {
+            "mode": attention_intervention,
+            "prompt_length": input_len,
+            "image_token_range": (img_token_start, img_token_end),
+        }
+
     print(f"[inference] Running generation for {model_name} ...")
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            output_attentions=True,        # populates attn weights for the hook
-            output_hidden_states=True,     # post-norm hidden states, per step
-            return_dict_in_generate=True,
-        )
+    try:
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                output_attentions=True,        # populates attn weights for the hook
+                output_hidden_states=True,     # post-norm hidden states, per step
+                return_dict_in_generate=True,
+            )
+    finally:
+        if attention_intervention and hasattr(model, "latent_attention_intervention"):
+            model.latent_attention_intervention = None
+        store.remove_hooks()
     print(f"[inference] Finished generation for {model_name} ...")
-    store.remove_hooks()
 
     sequences = outputs.sequences
     gen_ids = sequences[0, input_len:].tolist()
@@ -356,6 +378,7 @@ def run_inference(
         "prompt_length": input_len,
         "image_grid_hw":  (grid_h, grid_w),
         "image_token_range": (img_token_start, img_token_end),
+        "attention_intervention": attention_intervention,
     }
 
 
