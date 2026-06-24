@@ -11,6 +11,7 @@ import numpy as np
 import joblib
 from pathlib import Path
 from sklearn.manifold import TSNE
+from sklearn.metrics import pairwise_distances
 
 PRECOMPUTED_DIR = Path("precomputed")
 MAX_LEGACY_UMAP_BYTES = 512 * 1024 * 1024
@@ -36,6 +37,52 @@ def project_onto_manifold(activations: np.ndarray, model_name: str) -> np.ndarra
     coords = umap_model.transform(activations.astype(np.float32))
     return coords
 
+
+def compute_neighborhood_preservation_scores(
+    activations: np.ndarray,
+    coords_2d: np.ndarray,
+    n_neighbors: int = 10,
+) -> np.ndarray:
+    """Return a local projection-reliability score for every token.
+
+    Each score is the fraction of nearest neighbours shared between the
+    original hidden-state space and the 2D projection. A score of 1 means the
+    local neighbourhood is fully preserved; 0 means it is completely changed.
+    This is a per-token diagnostic, not scikit-learn's global trustworthiness.
+    """
+    high_dim = np.asarray(activations, dtype=np.float32)
+    low_dim = np.asarray(coords_2d, dtype=np.float32)
+
+    if high_dim.ndim != 2 or low_dim.ndim != 2:
+        raise ValueError("activations and coords_2d must both be 2D arrays")
+    if len(high_dim) != len(low_dim):
+        raise ValueError(
+            "activations and coords_2d must contain the same number of tokens"
+        )
+    if n_neighbors < 1:
+        raise ValueError("n_neighbors must be at least 1")
+
+    token_count = len(high_dim)
+    if token_count == 0:
+        return np.empty(0, dtype=np.float32)
+    if token_count == 1:
+        return np.ones(1, dtype=np.float32)
+
+    k = min(n_neighbors, token_count - 1)
+    high_dist = pairwise_distances(high_dim, metric="euclidean")
+    low_dist = pairwise_distances(low_dim, metric="euclidean")
+    np.fill_diagonal(high_dist, np.inf)
+    np.fill_diagonal(low_dist, np.inf)
+    high_neighbors = np.argsort(high_dist, axis=1)[:, :k]
+    low_neighbors = np.argsort(low_dist, axis=1)[:, :k]
+
+    scores = np.empty(token_count, dtype=np.float32)
+    for index in range(token_count):
+        overlap = np.intersect1d(
+            high_neighbors[index], low_neighbors[index], assume_unique=True
+        ).size
+        scores[index] = overlap / k
+    return scores
 
 def tsne_reproject(points_2d: np.ndarray, labels: list[str]) -> tuple[np.ndarray, list[str]]:
     """

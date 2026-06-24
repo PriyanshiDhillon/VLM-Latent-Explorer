@@ -125,12 +125,17 @@ def _execute_inference_and_update(
     if dl.umap_model_exists(model_name):
         try:
             result["coords_2d"] = proj.project_onto_manifold(result["activations"], model_name)
+            result["trustworthiness_scores"] = proj.compute_neighborhood_preservation_scores(
+                result["activations"], result["coords_2d"]
+            )
         except Exception as exc:
             result["coords_2d"] = None
+            result["trustworthiness_scores"] = None
             result["projection_error"] = str(exc)
             print(f"[projection] {model_name}/{inst_id}: {exc}")
     else:
         result["coords_2d"] = None
+        result["trustworthiness_scores"] = None
 
     nearest_text: list = [None] * len(result["token_types"])
     if result.get("coords_2d") is not None and corpus and corpus.get("coords") and corpus.get("labels"):
@@ -1432,16 +1437,37 @@ def _build_uncertainty_display(result: dict, current_step: int):
     scores = result.get("trustworthiness_scores")   # list[float] | None
     token_types = result.get("token_types", [])
 
-    if not scores:
+    if scores is None or len(scores) == 0:
         return html.Div(
             "Uncertainty scores not available for this run.",
             className="stat-row",
             style={"color": "#9ca3af", "fontStyle": "italic"},
         )
 
+    scores = [float(score) for score in scores]
+    selected_score = scores[current_step] if 0 <= current_step < len(scores) else None
+    mean_score = float(np.mean(scores))
+    summary = html.Div(
+        [
+            html.Span(
+                f"Current: {selected_score:.2f}"
+                if selected_score is not None
+                else "Current: n/a"
+            ),
+            html.Span(f"Mean: {mean_score:.2f}", style={"marginLeft": "16px"}),
+        ],
+        className="stat-row",
+        title="Fraction of nearest neighbours preserved after projection to 2D.",
+    )
+
     items = []
     for i, (score, ttype) in enumerate(zip(scores, token_types)):
-        color = TOKEN_COLORS.get(ttype, "#6b7280")
+        if score >= 0.75:
+            color = "#22c55e"
+        elif score >= 0.5:
+            color = "#f59e0b"
+        else:
+            color = "#ef4444"
         is_current = i == current_step
         bar_width = f"{max(4, int(score * 100))}%"
         items.append(
@@ -1450,7 +1476,7 @@ def _build_uncertainty_display(result: dict, current_step: int):
                     "uncertainty-token uncertainty-token--active"
                     if is_current else "uncertainty-token"
                 ),
-                title=f"Step {i} | {ttype} | trust={score:.2f}",
+                title=f"Step {i} | {ttype} | neighbour preservation={score:.2f}",
                 children=[
                     html.Div(
                         style={
@@ -1465,4 +1491,6 @@ def _build_uncertainty_display(result: dict, current_step: int):
                 ],
             )
         )
-    return html.Div(items, className="uncertainty-bar-strip")
+    return html.Div(
+        [summary, html.Div(items, className="uncertainty-bar-strip")]
+    )
