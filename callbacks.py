@@ -740,11 +740,12 @@ def register_callbacks(app):
         State("store-instances", "data"),
     )
     def reload_corpus(model_name, active_id, instances):
-        if ctx.triggered_id == "store-active-instance":
-            if active_id and instances and active_id in instances:
-                inst_model = (instances[active_id] or {}).get("model_name")
-                if inst_model:
-                    model_name = inst_model
+        # Always use the active instance's model when one exists — the corpus
+        # must match the coordinate space of the displayed instance.
+        if active_id and instances and active_id in instances:
+            inst_model = (instances[active_id] or {}).get("model_name")
+            if inst_model:
+                model_name = inst_model
         if not model_name or not dl.corpus_embeddings_exist(model_name):
             return {}
         try:
