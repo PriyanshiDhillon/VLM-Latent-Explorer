@@ -4,7 +4,11 @@ import joblib
 import numpy as np
 from pathlib import Path
 
-PRECOMPUTED_DIR = Path("precomputed")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PRECOMPUTED_DIR = Path(os.environ.get("PRECOMPUTED_DIR", "precomputed"))
+if not PRECOMPUTED_DIR.is_absolute():
+    PRECOMPUTED_DIR = PROJECT_ROOT / PRECOMPUTED_DIR
+
 DATA_DIR = Path("data/subset")
 
 MODELS = ["qwen", "monet", "lvr"]

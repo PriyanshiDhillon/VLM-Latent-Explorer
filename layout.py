@@ -575,6 +575,46 @@ def row_three() -> dbc.Row:
     )
 
 
+
+def token_comparison_row() -> dbc.Row:
+    return dbc.Row(className="g-3 mt-1", children=[
+        dbc.Col(width=12, children=[
+            html.Div(className="content-card token-comparison-card", children=[
+                html.Div(className="token-comparison-header", children=[
+                    html.Div([
+                        html.Div(
+                            "Causal Intervention Token Comparison",
+                            className="content-card-title",
+                        ),
+                        html.Div(
+                            "Order-preserving alignment; the reasoning slider follows the current instance",
+                            className="content-card-subtitle",
+                        ),
+                    ]),
+                    html.Div([
+                        html.Div(
+                            "Compare current instance with",
+                            className="panel-label",
+                        ),
+                        dcc.Dropdown(
+                            id="comparison-instance-selector",
+                            options=[],
+                            value=None,
+                            clearable=False,
+                            placeholder="Run an intervention first",
+                            className="comparison-instance-selector",
+                        ),
+                    ], className="comparison-selector-wrap"),
+                ]),
+                html.Div(
+                    id="token-comparison-display",
+                    className="token-comparison-display",
+                    children="Run an intervention to compare generated tokens.",
+                ),
+            ]),
+        ]),
+    ])
+
 def dashboard_page() -> html.Section:
     return html.Section(
         id="dashboard-page",
@@ -616,6 +656,7 @@ def dashboard_page() -> html.Section:
                             attention_row(),
                             row_two(),
                             row_three(),
+                            token_comparison_row(),
                         ],
                     ),
                 ],

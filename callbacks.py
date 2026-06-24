@@ -28,6 +28,8 @@ from backend import projection as proj
 from backend import data_loader as dl
 from backend import inference as inf
 from backend import token_attention as token_attn
+from backend import token_alignment
+from backend import representation_comparison
 
 import plotly.graph_objects as go
 
@@ -1280,6 +1282,105 @@ def register_callbacks(app):
 
 
     # ── Mask graph: render uploaded image so user can draw a selection ────────
+    @app.callback(
+        Output("comparison-instance-selector", "options"),
+        Output("comparison-instance-selector", "value"),
+        Input("store-instances", "data"),
+        Input("store-active-instance", "data"),
+        State("comparison-instance-selector", "value"),
+    )
+    def update_comparison_instance_options(instances, active_id, selected_id):
+        options = [{"label": key, "value": key} for key in (instances or {}) if key != active_id]
+        valid = {option["value"] for option in options}
+        if selected_id not in valid:
+            selected_id = options[0]["value"] if options else None
+        return options, selected_id
+
+    @app.callback(
+        Output("token-comparison-display", "children"),
+        Input("step-slider", "value"),
+        Input("store-active-instance", "data"),
+        Input("comparison-instance-selector", "value"),
+        Input("store-instances", "data"),
+        State("model-selector", "value"),
+    )
+    def update_token_comparison(step, active_id, reference_id, instances, model_name):
+        if not active_id or not reference_id or not instances:
+            return html.Div("Run an intervention to compare generated tokens.", className="comparison-placeholder")
+        if active_id not in instances or reference_id not in instances:
+            raise PreventUpdate
+        current, reference = instances[active_id], instances[reference_id]
+        alignment = token_alignment.align_token_sequences(
+            current.get("token_strings", []), reference.get("token_strings", []),
+            current.get("token_types", []), reference.get("token_types", []))
+
+        def load_activations(instance_id):
+            path = dl.PRECOMPUTED_DIR / "online_cache" / str(model_name) / f"{instance_id}.npz"
+            try:
+                with np.load(path, allow_pickle=False) as cached:
+                    return np.asarray(cached["activations"], dtype=np.float32)
+            except (OSError, KeyError, ValueError):
+                return None
+
+        current_activations = load_activations(active_id)
+        reference_activations = load_activations(reference_id)
+        for row in alignment:
+            ci, ri = row["current_index"], row["reference_index"]
+            row["representation_change"] = None
+            if (current_activations is not None and reference_activations is not None
+                    and ci is not None and ri is not None
+                    and ci < len(current_activations) and ri < len(reference_activations)):
+                row["representation_change"] = representation_comparison.cosine_change(
+                    current_activations[ci], reference_activations[ri])
+        representation_changes = [row["representation_change"] for row in alignment
+                                  if row["representation_change"] is not None]
+        step = int(step or 0)
+        selected = next((row for row in alignment if row["current_index"] == step), None)
+        counts = {op: sum(row["operation"] == op for row in alignment)
+                  for op in ("match", "replace", "insert", "delete")}
+        if selected:
+            ref_label = (f"step {selected['reference_index']}: {selected['reference_token']!r}"
+                         if selected["reference_index"] is not None else "no corresponding token")
+            current_summary = html.Div([
+                html.Strong(f"Current step {step}: {selected['current_token']!r}"),
+                html.Span("->", className="comparison-arrow"), html.Strong(f"{reference_id} {ref_label}"),
+                html.Span(selected["operation"].upper(),
+                          className=f"comparison-status comparison-status--{selected['operation']}"),
+                html.Span(
+                    f"Hidden-state change: {selected['representation_change']:.3f}"
+                    if selected["representation_change"] is not None else "Hidden-state change unavailable",
+                    className="comparison-hidden-change"),
+            ], className="comparison-current-summary")
+        else:
+            current_summary = html.Div("Current step could not be aligned.")
+        summary = html.Div([
+            html.Span(f"Current: {active_id}", className="comparison-instance-name"),
+            html.Span(f"Reference: {reference_id}", className="comparison-instance-name"),
+            *[html.Span(f"{op.title()} {counts[op]}", className=f"comparison-count comparison-count--{op}")
+              for op in ("match", "replace", "insert", "delete")],
+            html.Span(f"Mean hidden-state change {np.mean(representation_changes):.3f}",
+                      className="comparison-count comparison-count--representation")
+            if representation_changes else html.Span("Hidden states unavailable", className="comparison-count"),
+        ], className="comparison-summary")
+        rows = []
+        for row in alignment:
+            ci = "-" if row["current_index"] is None else str(row["current_index"])
+            ri = "-" if row["reference_index"] is None else str(row["reference_index"])
+            ct = "[none]" if row["current_token"] is None else repr(row["current_token"])
+            rt = "[none]" if row["reference_token"] is None else repr(row["reference_token"])
+            change = row["representation_change"]
+            status_label = row["operation"] if change is None else f"{row['operation']} | d={change:.3f}"
+            rows.append(html.Div([
+                html.Span(ci, className="comparison-step"), html.Span(ct, className="comparison-token"),
+                html.Span("->", className="comparison-arrow"),
+                html.Span(ri, className="comparison-step"), html.Span(rt, className="comparison-token"),
+                html.Span(status_label, title="1 - cosine similarity of the original hidden-state vectors",
+                          className=f"comparison-status comparison-status--{row['operation']}"),
+            ], className="comparison-row comparison-row--active"
+               if row["current_index"] == step else "comparison-row"))
+        return html.Div([summary, current_summary, html.Div(rows, className="comparison-list")])
+
+
     @app.callback(
         Output("mask-image-graph", "figure"),
         Input("store-current-image-b64", "data"),
