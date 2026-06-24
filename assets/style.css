@@ -684,3 +684,550 @@ html, body {
 }
 .uncertainty-token--active { opacity: 1; }
 
+
+/* ── Paged experiment interface ───────────────────────────────────────────── */
+html {
+  scroll-behavior: smooth;
+}
+
+html, body {
+  overflow: hidden;
+}
+
+.paged-root {
+  height: 100vh;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(201, 168, 76, 0.18), transparent 28%),
+    radial-gradient(circle at 80% 10%, rgba(45, 74, 62, 0.20), transparent 32%),
+    var(--page-bg);
+}
+
+.page-deck {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+}
+
+.page-deck::-webkit-scrollbar {
+  height: 8px;
+}
+
+.story-page {
+  position: relative;
+  flex: 0 0 100vw;
+  width: 100vw;
+  height: 100vh;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+  overflow: hidden;
+  padding: 28px;
+}
+
+.glass-panel {
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 28px;
+  box-shadow: 0 18px 50px rgba(30, 53, 48, 0.12);
+  backdrop-filter: blur(18px);
+}
+
+.welcome-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.welcome-copy {
+  width: min(780px, 78vw);
+  text-align: center;
+  transform: none;
+}
+
+.welcome-kicker {
+  color: var(--text-secondary);
+  font-size: 1rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  margin-bottom: 14px;
+  font-weight: 800;
+}
+
+.welcome-copy h1 {
+  color: var(--text-primary);
+  font-size: clamp(2.4rem, 6vw, 5.8rem);
+  line-height: 0.95;
+  font-weight: 900;
+  letter-spacing: -0.07em;
+  margin: 0;
+}
+
+.welcome-orb {
+  margin: 36px auto 0;
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--accent-dark);
+  border: 1px solid rgba(30, 53, 48, 0.18);
+  background: radial-gradient(circle at 30% 30%, #ffffff, rgba(201,168,76,0.28));
+  box-shadow: 0 18px 55px rgba(30, 53, 48, 0.18);
+  font-size: 4.4rem;
+}
+
+.page-arrow,
+.page-cta {
+  text-decoration: none;
+  color: var(--accent-dark);
+  background: var(--accent-gold);
+  border: 0;
+  border-radius: 999px;
+  font-weight: 900;
+  box-shadow: 0 10px 28px rgba(201, 168, 76, 0.32);
+  transition: box-shadow 180ms ease, filter 180ms ease, background 180ms ease;
+}
+
+.page-arrow:hover,
+.page-cta:hover {
+  color: var(--accent-dark);
+  filter: brightness(1.035);
+  box-shadow: 0 14px 34px rgba(201, 168, 76, 0.44);
+}
+
+.page-arrow:hover {
+  transform: scale(1.04);
+}
+
+.page-arrow-right {
+  position: absolute;
+  right: 56px;
+  top: 50%;
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  font-size: 2rem;
+}
+
+.experiments-page {
+  overflow-y: auto;
+}
+
+.experiments-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(360px, 430px) minmax(430px, 600px) 220px;
+  grid-template-rows: auto 1fr;
+  gap: 26px;
+  justify-content: center;
+  min-height: calc(100vh - 56px);
+}
+
+.experiment-control-panel {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: start;
+  padding: 28px 30px;
+  max-width: 430px;
+}
+
+.experiments-title {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  align-self: start;
+  text-align: center;
+  color: var(--text-primary);
+  font-size: clamp(2rem, 5vw, 4.2rem);
+  font-weight: 900;
+  letter-spacing: -0.06em;
+  padding-top: 10px;
+}
+
+.input-panel {
+  grid-column: 2;
+  grid-row: 2;
+  padding: 28px 30px;
+  align-self: start;
+}
+
+.experiments-nav-rail {
+  grid-column: 3;
+  grid-row: 2;
+  position: sticky;
+  top: 28px;
+  height: calc(100vh - 84px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: start;
+}
+
+.dashboard-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 13px 18px;
+  min-height: 56px;
+  white-space: nowrap;
+}
+
+.section-title {
+  color: var(--text-primary);
+  font-size: 1.05rem;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  margin-bottom: 4px;
+}
+
+.section-title-small {
+  margin-top: 18px;
+  font-size: 0.82rem;
+}
+
+.section-subtitle,
+.experiment-note {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.model-card-row {
+  display: flex;
+  gap: 12px;
+  margin: 18px 0 14px;
+}
+
+.model-card {
+  flex: 1;
+  min-height: 58px;
+  border: 1px solid rgba(255,255,255,0.68);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(255,255,255,0.72), rgba(255,255,255,0.32));
+  color: var(--accent-dark);
+  font-weight: 900;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.7), 0 10px 28px rgba(30,53,48,0.10);
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+.model-card:hover,
+.model-card:focus-visible {
+  transform: translateY(-2px);
+  background: linear-gradient(135deg, #ffffff, rgba(201,168,76,0.36));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.8), 0 16px 34px rgba(30,53,48,0.16);
+  outline: none;
+}
+
+.model-card--active {
+  background: linear-gradient(135deg, var(--accent-gold), #f2d88b);
+  border-color: rgba(30,53,48,0.20);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.55), 0 16px 34px rgba(201,168,76,0.30);
+}
+
+.selected-model-label {
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 700;
+  margin: -4px 0 12px;
+}
+
+.experiment-choice-title {
+  margin-top: 22px;
+}
+
+.load-model-btn {
+  width: 100%;
+  border-radius: 14px !important;
+  background: var(--accent-dark) !important;
+  border: none !important;
+  color: #ffffff !important;
+  font-weight: 800 !important;
+}
+
+.model-load-status {
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  min-height: 20px;
+  margin-top: 8px;
+}
+
+.hidden-control {
+  display: none !important;
+}
+
+.experiment-radio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  margin: 16px 0;
+}
+
+.experiment-radio label,
+.experiment-radio-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: min(100%, 280px);
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(30,53,48,0.10);
+  background: rgba(255,255,255,0.56);
+  color: var(--text-primary);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.experiment-radio input {
+  margin-right: 8px;
+  accent-color: var(--accent-gold);
+}
+
+.input-label {
+  color: var(--accent-dark);
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  margin: 14px 0 6px;
+}
+
+.input-label-muted {
+  color: var(--text-secondary);
+}
+
+.question-input {
+  border-radius: 18px !important;
+  border: 1px solid rgba(30,53,48,0.12) !important;
+  background: rgba(255,255,255,0.72) !important;
+  resize: none !important;
+}
+
+.intervention-question {
+  min-height: 66px;
+}
+
+.experiment-run-btn {
+  width: min(260px, 80%);
+  display: block !important;
+  margin: 22px auto 0;
+  border-radius: 999px !important;
+  font-size: 1rem !important;
+}
+
+.mask-panel {
+  margin-top: 10px;
+}
+
+.intervention-trace {
+  color: #6b7280;
+  font-style: italic;
+}
+
+.dashboard-page {
+  padding: 22px;
+}
+
+.dashboard-shell {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 18px;
+  width: 100%;
+  height: 100%;
+}
+
+.dashboard-rail {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  overflow-y: auto;
+  position: relative;
+}
+
+.instances-card {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 18px;
+  min-height: 130px;
+}
+
+.dashboard-workspace {
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  padding-right: 10px;
+}
+
+.dashboard-top {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  padding-bottom: 10px;
+  background: linear-gradient(180deg, var(--page-bg), rgba(238,242,240,0.78), transparent);
+}
+
+.back-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  min-height: 52px;
+  padding: 13px 18px;
+  font-size: 1rem;
+}
+
+.dashboard-trace-card {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(50% + 78px);
+  bottom: 0;
+  padding: 18px;
+  overflow: hidden;
+}
+
+.dashboard-trace-card .reasoning-trace {
+  max-height: calc(100% - 34px);
+  background: rgba(248,250,249,0.76);
+}
+
+.dashboard-rail .instance-badge {
+  background: rgba(30, 53, 48, 0.72) !important;
+  border-color: rgba(30, 53, 48, 0.20) !important;
+  color: #ffffff !important;
+}
+
+.dashboard-rail .instance-badge.active-badge,
+.dashboard-rail .instance-badge.intervention-badge.active-badge {
+  background: var(--accent-gold) !important;
+  border-color: var(--accent-gold) !important;
+  color: var(--accent-dark) !important;
+}
+
+.dashboard-page .content-card {
+  background: rgba(255,255,255,0.88);
+}
+
+@media (max-width: 1100px) {
+  .experiments-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+  .experiment-control-panel,
+  .experiments-title,
+  .input-panel,
+  .experiments-nav-rail,
+  .experiment-output {
+    grid-column: 1;
+    grid-row: auto;
+  }
+  .experiments-nav-rail {
+    position: static;
+    height: auto;
+    justify-content: flex-start;
+  }
+  .dashboard-cta {
+    margin-top: 16px;
+  }
+  .dashboard-shell {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Final page-card spacing guard.
+   Keep this at the end so Dash/Bootstrap/card-specific rules cannot collapse
+   the interior spacing on the experiment and dashboard cards. */
+.paged-root .glass-panel,
+.paged-root .experiment-control-panel,
+.paged-root .input-panel,
+.paged-root .instances-card,
+.paged-root .dashboard-trace-card,
+.paged-root .model-picker,
+.paged-root .experiment-selector,
+.paged-root .experiment-output {
+  box-sizing: border-box !important;
+  padding: 32px !important;
+}
+
+.paged-root .experiment-control-panel > *,
+.paged-root .input-panel > *,
+.paged-root .instances-card > *,
+.paged-root .dashboard-trace-card > *,
+.paged-root .model-picker > *,
+.paged-root .experiment-selector > *,
+.paged-root .experiment-output > * {
+  max-width: 100%;
+}
+
+.paged-root .experiment-control-panel,
+.paged-root .model-picker,
+.paged-root .experiment-selector {
+  height: auto !important;
+  min-height: auto !important;
+}
+
+.paged-root .model-card-row,
+.paged-root .experiment-radio {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+.paged-root .dashboard-trace-card .reasoning-trace,
+.paged-root .experiment-output .reasoning-trace {
+  margin-top: 12px;
+}
+
+/* Final navigation/card polish. */
+.paged-root .dashboard-cta {
+  flex: 0 0 auto !important;
+  align-self: center !important;
+  width: auto !important;
+  min-width: 190px !important;
+  max-width: 240px !important;
+  height: auto !important;
+  min-height: 56px !important;
+  max-height: 64px !important;
+  padding: 13px 22px !important;
+}
+
+.paged-root .experiments-nav-rail {
+  min-width: 220px;
+}
+
+.paged-root .dashboard-rail .glass-panel,
+.paged-root .instances-card,
+.paged-root .dashboard-trace-card {
+  box-shadow: none !important;
+}
+
+.paged-root .dashboard-top {
+  padding: 14px 18px 18px;
+}
+
+.paged-root .global-step-bar {
+  padding: 0 16px 14px;
+  overflow: visible;
+}
+
+.paged-root .step-bar-label {
+  color: var(--text-primary);
+  font-weight: 900;
+  font-size: 1.05rem;
+  line-height: 1.2;
+  margin-bottom: 8px;
+}
+
+.paged-root .global-step-slider {
+  padding: 8px 14px 18px !important;
+}
