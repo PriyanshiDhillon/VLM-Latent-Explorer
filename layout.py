@@ -1,6 +1,18 @@
 from dash import dcc, html
 import dash_bootstrap_components as dbc
 
+_BLANK_FIGURE = {
+    "data": [],
+    "layout": {
+        "template": "plotly_white",
+        "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
+        "xaxis": {"showgrid": False, "showticklabels": False, "zeroline": False},
+        "yaxis": {"showgrid": False, "showticklabels": False, "zeroline": False},
+        "paper_bgcolor": "#1e293b",
+        "plot_bgcolor": "#1e293b",
+    },
+}
+
 MODEL_OPTIONS = [
     {"label": "Qwen2.5-VL (baseline)", "value": "qwen"},
     {"label": "Monet-7B",              "value": "monet"},
@@ -37,6 +49,7 @@ def sidebar() -> html.Div:
                 html.Div("Visual Latent Reasoning Analysis", className="sidebar-subtitle"),
             ]),
 
+            # ── MODEL ─────────────────────────────────────────────────────
             html.Div("Model", className="sidebar-label"),
             dbc.Select(
                 id="model-selector",
@@ -69,7 +82,13 @@ def sidebar() -> html.Div:
 
             html.Hr(className="sidebar-divider"),
 
-            # ── INPUT SECTION ────────────────────────────────────────────
+            # ── INSTANCES ─────────────────────────────────────────────────
+            html.Div("Instances", className="sidebar-label"),
+            html.Div(id="instance-list", className="instance-list mb-2"),
+
+            html.Hr(className="sidebar-divider"),
+
+            # ── INFERENCE ─────────────────────────────────────────────────
             html.Div("Question", className="sidebar-label"),
             dbc.Textarea(
                 id="question-input",
@@ -96,17 +115,59 @@ def sidebar() -> html.Div:
             html.Div("Reasoning Trace", className="sidebar-label"),
             html.Div(id="reasoning-trace", className="reasoning-trace mb-2"),
 
-            html.Hr(className="sidebar-divider"),
-
-            html.Div("Instances", className="sidebar-label"),
-            html.Div(id="instance-list", className="instance-list mb-2"),
-
-            html.Div(style={"flex": "1"}),
-
             dbc.Button(
                 "▶  Run Inference",
                 id="run-btn",
-                className="run-btn w-100",
+                className="run-btn w-100 mb-2",
+            ),
+
+            html.Hr(className="sidebar-divider"),
+
+            # ── CAUSAL INTERVENTION ───────────────────────────────────────
+            html.Div("Causal Intervention", className="sidebar-label"),
+
+            html.Div("Modified Question", className="intervention-sublabel"),
+            dbc.Textarea(
+                id="intervention-question-input",
+                placeholder="Leave empty to reuse current question…",
+                rows=2,
+                className="mb-2 sidebar-input",
+            ),
+
+            html.Div("Image Mask", className="intervention-sublabel"),
+            html.Div(
+                "Draw a box on the image to black out a region",
+                className="intervention-hint",
+            ),
+            dcc.Graph(
+                id="mask-image-graph",
+                config={
+                    "modeBarButtonsToAdd": ["select2d"],
+                    "modeBarButtonsToRemove": [
+                        "zoom2d", "pan2d", "zoomIn2d", "zoomOut2d",
+                        "autoScale2d", "resetScale2d", "lasso2d", "toImage",
+                    ],
+                    "displayModeBar": True,
+                    "scrollZoom": False,
+                    "displaylogo": False,
+                },
+                style={"height": "150px"},
+                figure=_BLANK_FIGURE,
+            ),
+
+            html.Div("Intervention Trace", className="intervention-sublabel"),
+            html.Div(
+                id="intervention-reasoning-trace",
+                className="reasoning-trace mb-2",
+                children="Run an intervention to see its trace here.",
+                style={"color": "#9ca3af", "fontStyle": "italic"},
+            ),
+
+            dbc.Button(
+                "▶  Run Intervention",
+                id="run-intervention-btn",
+                className="intervention-btn w-100 mb-3",
+                n_clicks=0,
             ),
         ],
     )
@@ -468,5 +529,6 @@ def build_layout() -> html.Div:
             dcc.Store(id="store-current-image-b64", data=None),
             dcc.Store(id="store-active-projection", data="umap"),
             dcc.Store(id="store-umap-base",         data=None),
+            dcc.Store(id="store-mask-region",       data=None),
         ],
     )

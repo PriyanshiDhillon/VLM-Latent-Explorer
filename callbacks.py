@@ -21,7 +21,7 @@ import numpy as np
 from pathlib import Path
 from dash import Input, Output, Patch, State, callback, ctx, html, no_update, ALL
 from dash.exceptions import PreventUpdate
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from backend import heatmap as hm
 from backend import projection as proj
@@ -41,6 +41,18 @@ TOKEN_COLORS = {
 INSTANCE_LINE_STYLES = ["solid", "dash", "dot", "dashdot"]
 _TSNE_CACHE: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
 
+_BLANK_MASK_FIGURE = {
+    "data": [],
+    "layout": {
+        "template": "plotly_white",
+        "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
+        "xaxis": {"showgrid": False, "showticklabels": False, "zeroline": False},
+        "yaxis": {"showgrid": False, "showticklabels": False, "zeroline": False},
+        "paper_bgcolor": "#1e293b",
+        "plot_bgcolor": "#1e293b",
+    },
+}
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -49,6 +61,104 @@ def _b64_to_pil(b64_str: str) -> Image.Image:
     if "," in b64_str:
         b64_str = b64_str.split(",")[1]
     return Image.open(io.BytesIO(base64.b64decode(b64_str))).convert("RGB")
+
+
+def _apply_image_mask(image: Image.Image, mask_region: dict) -> Image.Image:
+    """Black out a normalised rectangular region of an image."""
+    img = image.copy().convert("RGB")
+    W, H = img.size
+    x0 = int(max(0.0, mask_region["x0_norm"]) * W)
+    y0 = int(max(0.0, mask_region["y0_norm"]) * H)
+    x1 = int(min(1.0, mask_region["x1_norm"]) * W)
+    y1 = int(min(1.0, mask_region["y1_norm"]) * H)
+    x0, x1 = sorted([x0, x1])
+    y0, y1 = sorted([y0, y1])
+    if x1 > x0 and y1 > y0:
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([x0, y0, x1, y1], fill=(0, 0, 0))
+    return img
+
+
+def _execute_inference_and_update(
+    image: Image.Image,
+    question: str,
+    model_name: str,
+    existing_instances: dict,
+    corpus: dict,
+    instance_prefix: str = "instance",
+    mask_region: dict | None = None,
+) -> tuple:
+    """Run inference and package results; shared by Run Inference and Run Intervention."""
+    if mask_region:
+        image = _apply_image_mask(image, mask_region)
+
+    result = inf.run_inference(image, question, model_name)
+    inst_id = f"{instance_prefix}_{len(existing_instances) + 1}"
+
+    cache_dir = Path("precomputed/online_cache") / model_name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    np.savez(
+        cache_dir / f"{inst_id}.npz",
+        activations=result["activations"],
+        token_types=np.array(result["token_types"]),
+        token_strings=np.array(result["token_strings"]),
+        token_ids=np.array(result["token_ids"]),
+        generated_text=result["generated_text"],
+        prompt_length=result["prompt_length"],
+        image_grid_hw=np.array(result["image_grid_hw"]),
+    )
+
+    attn_arr = np.empty(len(result["attn_weights"]), dtype=object)
+    for i, w in enumerate(result["attn_weights"]):
+        attn_arr[i] = w if w is not None else np.array([])
+    np.save(cache_dir / f"{inst_id}_attn_weights.npy", attn_arr, allow_pickle=True)
+
+    layer_attn_arr = np.empty(len(result["layer_attn_weights"]), dtype=object)
+    for li, layer_steps in enumerate(result["layer_attn_weights"]):
+        step_arr = np.empty(len(layer_steps), dtype=object)
+        for si, w in enumerate(layer_steps):
+            step_arr[si] = w if w is not None else np.array([])
+        layer_attn_arr[li] = step_arr
+    np.save(cache_dir / f"{inst_id}_layer_attn_weights.npy", layer_attn_arr, allow_pickle=True)
+
+    if dl.umap_model_exists(model_name):
+        try:
+            result["coords_2d"] = proj.project_onto_manifold(result["activations"], model_name)
+        except Exception as exc:
+            result["coords_2d"] = None
+            result["projection_error"] = str(exc)
+            print(f"[projection] {model_name}/{inst_id}: {exc}")
+    else:
+        result["coords_2d"] = None
+
+    nearest_text: list = [None] * len(result["token_types"])
+    if result.get("coords_2d") is not None and corpus and corpus.get("coords") and corpus.get("labels"):
+        corpus_coords_arr = np.array(corpus["coords"], dtype=np.float32)
+        latent_indices = [i for i, t in enumerate(result["token_types"]) if t == "latent"]
+        if latent_indices:
+            latent_coords = result["coords_2d"][np.array(latent_indices)]
+            neighbors = proj.find_nearest_text_neighbors(
+                latent_coords, corpus_coords_arr, corpus["types"], corpus["labels"]
+            )
+            for idx, neighbor in zip(latent_indices, neighbors):
+                nearest_text[idx] = neighbor
+    result["nearest_text"] = nearest_text
+
+    if mask_region:
+        result["mask_region"] = mask_region
+
+    updated = dict(existing_instances)
+    updated[inst_id] = _result_to_serialisable(
+        {k: v for k, v in result.items() if k != "activations"}
+    )
+    n_steps = len(result["token_strings"])
+    marks = {i: str(i) for i in range(0, n_steps, max(1, n_steps // 10))}
+    trace_children = _build_reasoning_trace(
+        result["token_strings"], result["token_types"], result.get("nearest_text")
+    )
+    instance_children = _build_instance_list(updated, inst_id)
+    return updated, inst_id, n_steps - 1, 0, marks, trace_children, instance_children
 
 
 def _result_to_serialisable(result: dict) -> dict:
@@ -652,93 +762,9 @@ def register_callbacks(app):
     def run_inference(n_clicks, img_b64, question, model_name, existing_instances, corpus):
         if not model_name or not img_b64 or not question:
             raise PreventUpdate
-
         image = _b64_to_pil(img_b64)
-        result = inf.run_inference(image, question, model_name)
-        inst_id = f"instance_{len(existing_instances) + 1}"   # ← define first
-
-        cache_dir = Path("precomputed/online_cache") / model_name
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        np.savez(
-            cache_dir / f"{inst_id}.npz",
-            activations=result["activations"],
-            token_types=np.array(result["token_types"]),
-            token_strings=np.array(result["token_strings"]),
-            token_ids=np.array(result["token_ids"]),
-            generated_text=result["generated_text"],
-            prompt_length=result["prompt_length"],
-            image_grid_hw=np.array(result["image_grid_hw"]),
-        )
-
-        attn_weights_saveable = [
-            w if w is not None else np.array([])
-            for w in result["attn_weights"]
-        ]
-        attn_arr = np.empty(len(attn_weights_saveable), dtype=object)
-        for i, w in enumerate(attn_weights_saveable):
-            attn_arr[i] = w
-        np.save(
-            cache_dir / f"{inst_id}_attn_weights.npy",
-            attn_arr,
-            allow_pickle=True,
-        )
-        layer_attn_arr = np.empty(len(result["layer_attn_weights"]), dtype=object)
-        for layer_index, layer_steps in enumerate(result["layer_attn_weights"]):
-            step_arr = np.empty(len(layer_steps), dtype=object)
-            for step_index, weights in enumerate(layer_steps):
-                step_arr[step_index] = weights if weights is not None else np.array([])
-            layer_attn_arr[layer_index] = step_arr
-        np.save(
-            cache_dir / f"{inst_id}_layer_attn_weights.npy",
-            layer_attn_arr,
-            allow_pickle=True,
-        )
-        if dl.umap_model_exists(model_name):
-            try:
-                coords_2d = proj.project_onto_manifold(result["activations"], model_name)
-                result["coords_2d"] = coords_2d
-            except Exception as exc:
-                result["coords_2d"] = None
-                result["projection_error"] = str(exc)
-                print(f"[projection] {model_name}/{inst_id}: {exc}")
-        else:
-            result["coords_2d"] = None
-
-        # For each latent token, find the nearest text token in UMAP space
-        nearest_text: list = [None] * len(result["token_types"])
-        if result.get("coords_2d") is not None and corpus and corpus.get("coords") and corpus.get("labels"):
-            corpus_coords_arr = np.array(corpus["coords"], dtype=np.float32)
-            latent_indices = [i for i, t in enumerate(result["token_types"]) if t == "latent"]
-            if latent_indices:
-                latent_coords = result["coords_2d"][np.array(latent_indices)]
-                neighbors = proj.find_nearest_text_neighbors(
-                    latent_coords, corpus_coords_arr, corpus["types"], corpus["labels"]
-                )
-                for idx, neighbor in zip(latent_indices, neighbors):
-                    nearest_text[idx] = neighbor
-        result["nearest_text"] = nearest_text
-
-       # inst_id = f"instance_{len(existing_instances) + 1}"
-        updated_instances = dict(existing_instances)
-        serialisable = _result_to_serialisable(
-            {k: v for k, v in result.items() if k != "activations"}
-        )
-        updated_instances[inst_id] = serialisable
-        n_steps = len(result["token_strings"])
-        marks = {i: str(i) for i in range(0, n_steps, max(1, n_steps // 10))}
-
-        trace_children = _build_reasoning_trace(result["token_strings"], result["token_types"], result.get("nearest_text"))
-        instance_children = _build_instance_list(updated_instances, inst_id)
-
-        return (
-            updated_instances,
-            inst_id,
-            n_steps - 1,
-            0,
-            marks,
-            trace_children,
-            instance_children,
+        return _execute_inference_and_update(
+            image, question, model_name, existing_instances, corpus or {},
         )
 
     @app.callback(
@@ -818,6 +844,9 @@ def register_callbacks(app):
 
         if img_b64:
             image = _b64_to_pil(img_b64)
+            mask_region = result.get("mask_region")
+            if mask_region:
+                image = _apply_image_mask(image, mask_region)
             image_token_range = result.get("image_token_range")
             heatmap_src = hm.attn_to_heatmap_overlay(image, attn_at_step, grid_hw,
                                                       image_token_range=image_token_range)
@@ -1077,24 +1106,132 @@ def register_callbacks(app):
         return triggered["index"]
         
     @app.callback(
-        Output("reasoning-trace", "children", allow_duplicate=True),
-        Output("instance-list",   "children", allow_duplicate=True),
+        Output("instance-list",  "children", allow_duplicate=True),
+        Output("step-slider",    "max",      allow_duplicate=True),
+        Output("step-slider",    "value",    allow_duplicate=True),
+        Output("step-slider",    "marks",    allow_duplicate=True),
         Input("store-active-instance", "data"),
         State("store-instances",       "data"),
         prevent_initial_call=True,
     )
-    def update_trace_on_switch(active_id, instances):
+    def update_on_instance_switch(active_id, instances):
         if not active_id or active_id not in instances:
             raise PreventUpdate
         result = instances[active_id]
-        trace = _build_reasoning_trace(
-            result.get("token_strings", []),
-            result.get("token_types", []),
-            result.get("nearest_text"),
-        )
+        n_steps = len(result.get("token_strings", []))
+        marks = {i: str(i) for i in range(0, n_steps, max(1, n_steps // 10))}
         badges = _build_instance_list(instances, active_id)
-        return trace, badges
+        return badges, max(0, n_steps - 1), 0, marks
 
+
+    # ── Mask graph: render uploaded image so user can draw a selection ────────
+    @app.callback(
+        Output("mask-image-graph", "figure"),
+        Input("store-current-image-b64", "data"),
+        Input("store-mask-region",       "data"),
+        prevent_initial_call=True,
+    )
+    def update_mask_image(img_b64, mask_region):
+        if not img_b64:
+            return _BLANK_MASK_FIGURE
+        img = _b64_to_pil(img_b64)
+        W, H = img.size
+        fig = go.Figure()
+        fig.add_trace(go.Image(z=np.array(img)))
+        if mask_region:
+            x0 = mask_region["x0_norm"] * W
+            y0 = mask_region["y0_norm"] * H
+            x1 = mask_region["x1_norm"] * W
+            y1 = mask_region["y1_norm"] * H
+            fig.add_shape(
+                type="rect", x0=x0, y0=y0, x1=x1, y1=y1,
+                line=dict(color="#ef4444", width=2),
+                fillcolor="rgba(239,68,68,0.2)",
+            )
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0),
+            paper_bgcolor="#1e293b",
+            plot_bgcolor="#1e293b",
+            dragmode="select",
+            xaxis=dict(range=[-0.5, W - 0.5], showgrid=False,
+                       showticklabels=False, zeroline=False, visible=False),
+            yaxis=dict(range=[H - 0.5, -0.5], showgrid=False,
+                       showticklabels=False, zeroline=False, visible=False,
+                       scaleanchor="x"),
+        )
+        return fig
+
+    @app.callback(
+        Output("store-mask-region", "data"),
+        Input("mask-image-graph", "selectedData"),
+        State("mask-image-graph", "figure"),
+        prevent_initial_call=True,
+    )
+    def capture_mask_region(selected_data, figure):
+        if not selected_data or not selected_data.get("range"):
+            raise PreventUpdate  # figure re-render resets selectedData; don't clear stored mask
+        rng = selected_data["range"]
+        x_sel = rng.get("x", [0, 1])
+        y_sel = rng.get("y", [0, 1])
+        layout = (figure or {}).get("layout", {})
+        x_ax_range = layout.get("xaxis", {}).get("range", [-0.5, 1])
+        y_ax_range = layout.get("yaxis", {}).get("range", [1, -0.5])
+        W = x_ax_range[1] + 0.5
+        H = y_ax_range[0] + 0.5   # y is reversed: range[0] = H − 0.5
+        if W <= 0 or H <= 0:
+            raise PreventUpdate
+        return {
+            "x0_norm": max(0.0, min(x_sel) / W),
+            "x1_norm": min(1.0, max(x_sel) / W),
+            "y0_norm": max(0.0, min(y_sel) / H),
+            "y1_norm": min(1.0, max(y_sel) / H),
+        }
+
+    @app.callback(
+        Output("store-mask-region", "data", allow_duplicate=True),
+        Input("store-current-image-b64", "data"),
+        prevent_initial_call=True,
+    )
+    def clear_mask_on_new_image(_):
+        return None
+
+    # ── Causal intervention run ───────────────────────────────────────────────
+    @app.callback(
+        Output("intervention-reasoning-trace", "children"),
+        Output("store-instances",             "data",  allow_duplicate=True),
+        Output("store-active-instance",       "data",  allow_duplicate=True),
+        Output("step-slider",                 "max",   allow_duplicate=True),
+        Output("step-slider",                 "value", allow_duplicate=True),
+        Output("step-slider",                 "marks", allow_duplicate=True),
+        Output("instance-list",               "children", allow_duplicate=True),
+        Input("run-intervention-btn", "n_clicks"),
+        State("store-current-image-b64",        "data"),
+        State("question-input",                 "value"),
+        State("intervention-question-input",    "value"),
+        State("model-selector",                 "value"),
+        State("store-instances",                "data"),
+        State("store-corpus-embeddings",        "data"),
+        State("store-mask-region",              "data"),
+        prevent_initial_call=True,
+    )
+    def run_intervention(
+        n_clicks, img_b64, question, intervention_question,
+        model_name, existing_instances, corpus, mask_region,
+    ):
+        if not model_name or not img_b64:
+            raise PreventUpdate
+        effective_question = (intervention_question or "").strip() or (question or "").strip()
+        if not effective_question:
+            raise PreventUpdate
+        image = _b64_to_pil(img_b64)
+        updated, inst_id, max_step, val, marks, trace_children, instance_children = \
+            _execute_inference_and_update(
+                image, effective_question, model_name,
+                existing_instances, corpus or {},
+                instance_prefix="intervention",
+                mask_region=mask_region,
+            )
+        return trace_children, updated, inst_id, max_step, val, marks, instance_children
 
     @app.callback(
         Output("eval-display", "children"),
@@ -1105,9 +1242,32 @@ def register_callbacks(app):
             return "No instances yet."
         rows = []
         for inst_id, data in instances.items():
-            correct = data.get("correct", None)
-            label = "✓" if correct else ("✗" if correct is False else "?")
-            rows.append(_stat_row(inst_id, label))
+            token_strings = data.get("token_strings", [])
+            token_types   = data.get("token_types", [])
+            text = "".join(
+                tok for tok, ttype in zip(token_strings, token_types)
+                if ttype != "latent"
+            ).strip()
+            snippet = text[:200] + "…" if len(text) > 200 else text
+            is_intervention = inst_id.startswith("intervention_")
+            rows.append(html.Div([
+                html.Div(
+                    inst_id,
+                    style={
+                        "fontSize": "0.68rem", "fontWeight": "700",
+                        "color": "#7c3aed" if is_intervention else "#1a2e28",
+                        "marginBottom": "3px",
+                    },
+                ),
+                html.Div(
+                    snippet or "–",
+                    style={
+                        "fontSize": "0.72rem", "color": "#374151",
+                        "lineHeight": "1.5", "marginBottom": "10px",
+                        "wordBreak": "break-word",
+                    },
+                ),
+            ]))
         return rows
     
 
@@ -1232,12 +1392,19 @@ def _build_instance_list(instances: dict, active_id: str):
     badges = []
     for inst_id in instances:
         is_active = inst_id == active_id
+        is_intervention = inst_id.startswith("intervention_")
+        label = inst_id
+        css = "me-1 instance-badge"
+        if is_active:
+            css += " active-badge"
+        if is_intervention:
+            css += " intervention-badge"
         badges.append(
             dbc.Badge(
-                inst_id,
+                label,
                 id={"type": "instance-badge", "index": inst_id},
-                color="primary" if is_active else "secondary",
-                className="me-1 instance-badge",
+                color="primary",
+                className=css,
                 n_clicks=0,
             )
         )
