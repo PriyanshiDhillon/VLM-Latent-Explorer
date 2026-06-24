@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import joblib
 import umap
@@ -6,7 +7,11 @@ from sklearn.pipeline import make_pipeline
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PRECOMPUTED = ROOT / "precomputed"
+PRECOMPUTED = Path(os.environ.get("PRECOMPUTED_DIR", "precomputed"))
+if not PRECOMPUTED.is_absolute():
+    PRECOMPUTED = ROOT / PRECOMPUTED
+PRECOMPUTED.mkdir(parents=True, exist_ok=True)
+
 MODELS = ["qwen", "monet", "lvr"]
 
 for model_name in MODELS:

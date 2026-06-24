@@ -6,6 +6,7 @@ Projection utilities.
 """
 
 from __future__ import annotations
+import os
 
 import numpy as np
 import joblib
@@ -13,7 +14,11 @@ from pathlib import Path
 from sklearn.manifold import TSNE
 from sklearn.metrics import pairwise_distances
 
-PRECOMPUTED_DIR = Path("precomputed")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PRECOMPUTED_DIR = Path(os.environ.get("PRECOMPUTED_DIR", "precomputed"))
+if not PRECOMPUTED_DIR.is_absolute():
+    PRECOMPUTED_DIR = PROJECT_ROOT / PRECOMPUTED_DIR
+
 MAX_LEGACY_UMAP_BYTES = 512 * 1024 * 1024
 
 

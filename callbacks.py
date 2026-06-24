@@ -95,7 +95,7 @@ def _execute_inference_and_update(
     result = inf.run_inference(image, question, model_name)
     inst_id = f"{instance_prefix}_{len(existing_instances) + 1}"
 
-    cache_dir = Path("precomputed/online_cache") / model_name
+    cache_dir = dl.PRECOMPUTED_DIR / "online_cache" / model_name
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     np.savez(
