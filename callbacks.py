@@ -93,6 +93,7 @@ def _execute_inference_and_update(
         image = _apply_image_mask(image, mask_region)
 
     result = inf.run_inference(image, question, model_name)
+    result["model_name"] = model_name
     inst_id = f"{instance_prefix}_{len(existing_instances) + 1}"
 
     cache_dir = Path("precomputed/online_cache") / model_name
@@ -463,9 +464,18 @@ def _build_umap_figure(
     # ── Instance traces ──────────────────────────────────────────────────────
     # Uniform appearance — no step-specific star/size. update_umap_step patches these.
     active_type_traces: dict[str, dict] = {}
+    active_model = None
+    if active_id and active_id in instances:
+        _ar = _result_from_serialisable(instances[active_id])
+        active_model = _ar.get("model_name")
     if show_trace:
         for idx, (inst_id, inst_data) in enumerate(instances.items()):
             result = _result_from_serialisable(inst_data)
+            # Instances from a different model live in a different UMAP coordinate space
+            # and cannot be meaningfully overlaid on this one.
+            inst_model = result.get("model_name")
+            if active_model and inst_model and inst_model != active_model:
+                continue
             coords_2d = result.get("coords_2d")
             if coords_2d is None or len(coords_2d) == 0:
                 continue
@@ -726,9 +736,16 @@ def register_callbacks(app):
     @app.callback(
         Output("store-corpus-embeddings", "data"),
         Input("model-selector", "value"),
+        Input("store-active-instance", "data"),
+        State("store-instances", "data"),
     )
-    def reload_corpus(model_name):
-        if not dl.corpus_embeddings_exist(model_name):
+    def reload_corpus(model_name, active_id, instances):
+        if ctx.triggered_id == "store-active-instance":
+            if active_id and instances and active_id in instances:
+                inst_model = (instances[active_id] or {}).get("model_name")
+                if inst_model:
+                    model_name = inst_model
+        if not model_name or not dl.corpus_embeddings_exist(model_name):
             return {}
         try:
             corpus = dl.load_corpus_embeddings(model_name)
@@ -827,14 +844,14 @@ def register_callbacks(app):
         State("store-instances",           "data"),
         State("store-active-projection",   "data"),
         State("store-current-image-b64",   "data"),
-        State("model-selector",            "value"),
         prevent_initial_call=True,
     )
-    def update_views(step, active_id, instances, projection_mode, img_b64, model_name):
+    def update_views(step, active_id, instances, projection_mode, img_b64):
         if not active_id or active_id not in instances:
             raise PreventUpdate
 
         result = _result_from_serialisable(instances[active_id])
+        model_name = result.get("model_name", "unknown")
         attn_list = result.get("attn_weights", [])
         grid_hw   = tuple(result.get("image_grid_hw", (16, 16)))
 
