@@ -29,6 +29,7 @@ from backend import data_loader as dl
 from backend import inference as inf
 from backend import token_attention as token_attn
 from backend import token_alignment
+from backend import representation_comparison
 
 import plotly.graph_objects as go
 
@@ -1151,8 +1152,9 @@ def register_callbacks(app):
         Input("store-active-instance", "data"),
         Input("comparison-instance-selector", "value"),
         Input("store-instances", "data"),
+        State("model-selector", "value"),
     )
-    def update_token_comparison(step, active_id, reference_id, instances):
+    def update_token_comparison(step, active_id, reference_id, instances, model_name):
         if not active_id or not reference_id or not instances:
             return html.Div("Run an intervention to compare generated tokens.", className="comparison-placeholder")
         if active_id not in instances or reference_id not in instances:
@@ -1161,6 +1163,27 @@ def register_callbacks(app):
         alignment = token_alignment.align_token_sequences(
             current.get("token_strings", []), reference.get("token_strings", []),
             current.get("token_types", []), reference.get("token_types", []))
+
+        def load_activations(instance_id):
+            path = dl.PRECOMPUTED_DIR / "online_cache" / str(model_name) / f"{instance_id}.npz"
+            try:
+                with np.load(path, allow_pickle=False) as cached:
+                    return np.asarray(cached["activations"], dtype=np.float32)
+            except (OSError, KeyError, ValueError):
+                return None
+
+        current_activations = load_activations(active_id)
+        reference_activations = load_activations(reference_id)
+        for row in alignment:
+            ci, ri = row["current_index"], row["reference_index"]
+            row["representation_change"] = None
+            if (current_activations is not None and reference_activations is not None
+                    and ci is not None and ri is not None
+                    and ci < len(current_activations) and ri < len(reference_activations)):
+                row["representation_change"] = representation_comparison.cosine_change(
+                    current_activations[ci], reference_activations[ri])
+        representation_changes = [row["representation_change"] for row in alignment
+                                  if row["representation_change"] is not None]
         step = int(step or 0)
         selected = next((row for row in alignment if row["current_index"] == step), None)
         counts = {op: sum(row["operation"] == op for row in alignment)
@@ -1173,6 +1196,10 @@ def register_callbacks(app):
                 html.Span("->", className="comparison-arrow"), html.Strong(f"{reference_id} {ref_label}"),
                 html.Span(selected["operation"].upper(),
                           className=f"comparison-status comparison-status--{selected['operation']}"),
+                html.Span(
+                    f"Hidden-state change: {selected['representation_change']:.3f}"
+                    if selected["representation_change"] is not None else "Hidden-state change unavailable",
+                    className="comparison-hidden-change"),
             ], className="comparison-current-summary")
         else:
             current_summary = html.Div("Current step could not be aligned.")
@@ -1181,6 +1208,9 @@ def register_callbacks(app):
             html.Span(f"Reference: {reference_id}", className="comparison-instance-name"),
             *[html.Span(f"{op.title()} {counts[op]}", className=f"comparison-count comparison-count--{op}")
               for op in ("match", "replace", "insert", "delete")],
+            html.Span(f"Mean hidden-state change {np.mean(representation_changes):.3f}",
+                      className="comparison-count comparison-count--representation")
+            if representation_changes else html.Span("Hidden states unavailable", className="comparison-count"),
         ], className="comparison-summary")
         rows = []
         for row in alignment:
@@ -1188,11 +1218,14 @@ def register_callbacks(app):
             ri = "-" if row["reference_index"] is None else str(row["reference_index"])
             ct = "[none]" if row["current_token"] is None else repr(row["current_token"])
             rt = "[none]" if row["reference_token"] is None else repr(row["reference_token"])
+            change = row["representation_change"]
+            status_label = row["operation"] if change is None else f"{row['operation']} | d={change:.3f}"
             rows.append(html.Div([
                 html.Span(ci, className="comparison-step"), html.Span(ct, className="comparison-token"),
                 html.Span("->", className="comparison-arrow"),
                 html.Span(ri, className="comparison-step"), html.Span(rt, className="comparison-token"),
-                html.Span(row["operation"], className=f"comparison-status comparison-status--{row['operation']}"),
+                html.Span(status_label, title="1 - cosine similarity of the original hidden-state vectors",
+                          className=f"comparison-status comparison-status--{row['operation']}"),
             ], className="comparison-row comparison-row--active"
                if row["current_index"] == step else "comparison-row"))
         return html.Div([summary, current_summary, html.Div(rows, className="comparison-list")])

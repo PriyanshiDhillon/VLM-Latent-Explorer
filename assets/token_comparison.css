@@ -1,0 +1,17 @@
+/* Hidden-state metrics layered onto the causal token comparison panel. */
+.comparison-count--representation,
+.comparison-hidden-change {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.comparison-hidden-change {
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.comparison-row {
+  grid-template-columns: 35px minmax(120px, 1fr) 22px 35px minmax(120px, 1fr) 112px;
+}
