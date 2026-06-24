@@ -683,6 +683,37 @@ def register_callbacks(app):
         return contents, {"display": "block"}, contents
 
     @app.callback(
+        Output("model-selector", "value"),
+        Output("selected-model-label", "children"),
+        Output({"type": "model-card", "index": ALL}, "className"),
+        Input({"type": "model-card", "index": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def choose_model_from_card(n_clicks):
+        if not ctx.triggered_id or not ctx.triggered or not ctx.triggered[0]["value"]:
+            raise PreventUpdate
+        selected = ctx.triggered_id["index"]
+        model_labels = {
+            "qwen": "Selected: Qwen2.5-VL",
+            "monet": "Selected: Monet-7B",
+            "lvr": "Selected: LVR",
+        }
+        classes = [
+            "model-card model-card--active" if model == selected else "model-card"
+            for model in ("qwen", "monet", "lvr")
+        ]
+        return selected, model_labels.get(selected, f"Selected: {selected}"), classes
+
+    @app.callback(
+        Output("mask-panel", "style"),
+        Input("experiment-selector", "value"),
+    )
+    def toggle_mask_panel(experiment_name):
+        if experiment_name == "image_mask":
+            return {"display": "block"}
+        return {"display": "none"}
+
+    @app.callback(
         Output("question-input", "value"),
         Output("uploaded-image-preview", "src", allow_duplicate=True),
         Output("store-current-image-b64", "data", allow_duplicate=True),
@@ -765,14 +796,42 @@ def register_callbacks(app):
         State("model-selector",            "value"),
         State("store-instances",           "data"),
         State("store-corpus-embeddings",   "data"),
+        State("experiment-selector",        "value"),
+        State("intervention-question-input","value"),
+        State("store-mask-region",          "data"),
         prevent_initial_call=True,
     )
-    def run_inference(n_clicks, img_b64, question, model_name, existing_instances, corpus):
+    def run_inference(
+        n_clicks, img_b64, question, model_name, existing_instances, corpus,
+        experiment_name, intervention_question, mask_region,
+    ):
         if not model_name or not img_b64 or not question:
             raise PreventUpdate
+        experiment_name = experiment_name or "normal"
+        effective_question = (
+            (intervention_question or "").strip()
+            if experiment_name in ("latent_bottleneck", "image_mask")
+            else ""
+        ) or question
         image = _b64_to_pil(img_b64)
+        instance_prefix = "instance"
+        selected_mask = None
+        attention_intervention = None
+        if experiment_name == "latent_bottleneck":
+            instance_prefix = "bottleneck"
+            attention_intervention = "question_latent_answer_bottleneck"
+        elif experiment_name == "image_mask":
+            instance_prefix = "mask"
+            selected_mask = mask_region
         return _execute_inference_and_update(
-            image, question, model_name, existing_instances, corpus or {},
+            image,
+            effective_question,
+            model_name,
+            existing_instances,
+            corpus or {},
+            instance_prefix=instance_prefix,
+            mask_region=selected_mask,
+            attention_intervention=attention_intervention,
         )
 
     @app.callback(
