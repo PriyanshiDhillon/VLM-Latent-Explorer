@@ -109,8 +109,7 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
 
     latent_decoding: Optional[LatentDecodingSpec] = None
     latent_attention_intervention: Optional[dict] = None
-    latent_swap_embeddings: Optional[list[torch.Tensor]] = None
-    latent_swap_config: Optional[dict] = None
+    latent_corruption: Optional[dict] = None
 
     def configure_latent_decoding(self, protocol: str) -> None:
         self.latent_decoding = latent_decoding_spec(self, protocol)
@@ -124,7 +123,6 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
         input_ids: torch.Tensor,
         generated_latent_mask: list[bool],
         generated_answer_mask: list[bool],
-        generated_swapped_latent_mask: Optional[list[bool]] = None,
     ) -> None:
         """Restrict answer-token queries to question text + latents + answer history."""
         cfg = self.latent_attention_intervention
@@ -150,67 +148,42 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
         allowed[int(image_start):int(image_end)] = 0
 
         generated_count = min(seq_len - prompt_length, len(generated_latent_mask))
-        strict_swap = bool(self.latent_swap_config and self.latent_swap_config.get("strict"))
         for i in range(generated_count):
-            allow_latent = generated_latent_mask[i]
-            if strict_swap:
-                allow_latent = bool(
-                    generated_swapped_latent_mask
-                    and i < len(generated_swapped_latent_mask)
-                    and generated_swapped_latent_mask[i]
-                )
-            if allow_latent or generated_answer_mask[i]:
+            if generated_latent_mask[i] or generated_answer_mask[i]:
                 allowed[prompt_length + i] = 1
 
         restricted = torch.ones_like(attention_mask)
         restricted[:, :seq_len] = allowed[None, :]
         model_inputs["attention_mask"] = restricted
 
-    def _apply_strict_latent_swap_mask(
+    def _corrupt_latent_embedding(
         self,
-        model_inputs: dict,
-        input_ids: torch.Tensor,
-        generated_swapped_latent_mask: list[bool],
-    ) -> None:
-        """Prevent swapped latent update steps from reading target image patches."""
-        cfg = self.latent_swap_config
-        if not cfg or not cfg.get("strict"):
-            return
-        attention_mask = model_inputs.get("attention_mask")
-        if attention_mask is None or attention_mask.ndim != 2:
-            return
+        embedding: torch.Tensor,
+        clean_latents: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Apply an intervention to the continuous latent fed into future steps."""
+        cfg = self.latent_corruption
+        if not cfg:
+            return embedding
 
-        prompt_length = int(cfg["prompt_length"])
-        image_start, image_end = cfg["image_token_range"]
-        seq_len = input_ids.shape[1]
-        allowed = torch.zeros(
-            (seq_len,), dtype=attention_mask.dtype, device=attention_mask.device
-        )
-        allowed[:prompt_length] = 1
-        allowed[int(image_start):int(image_end)] = 0
-
-        generated_count = min(seq_len - prompt_length, len(generated_swapped_latent_mask))
-        for i in range(generated_count):
-            if generated_swapped_latent_mask[i]:
-                allowed[prompt_length + i] = 1
-
-        restricted = torch.ones_like(attention_mask)
-        restricted[:, :seq_len] = allowed[None, :]
-        model_inputs["attention_mask"] = restricted
-
-    def _apply_strict_latent_swap_prefill_mask(self, model_kwargs: dict) -> None:
-        """Remove target image patches from the prompt KV cache in strict swap."""
-        cfg = self.latent_swap_config
-        if not cfg or not cfg.get("strict"):
-            return
-        attention_mask = model_kwargs.get("attention_mask")
-        if attention_mask is None or attention_mask.ndim != 2:
-            return
-
-        image_start, image_end = cfg["image_token_range"]
-        masked = attention_mask.clone()
-        masked[:, int(image_start):int(image_end)] = 0
-        model_kwargs["attention_mask"] = masked
+        mode = cfg.get("mode")
+        if mode == "zero":
+            return torch.zeros_like(embedding)
+        if mode == "mean":
+            if not clean_latents:
+                return embedding
+            return torch.stack(clean_latents, dim=0).mean(dim=0).to(
+                device=embedding.device,
+                dtype=embedding.dtype,
+            )
+        if mode == "gaussian":
+            scale = float(cfg.get("noise_scale", 1.0))
+            std = embedding.detach().float().std().clamp_min(1e-6).to(
+                device=embedding.device,
+                dtype=embedding.dtype,
+            )
+            return embedding + torch.randn_like(embedding) * std * scale
+        return embedding
 
     def _sample(
         self,
@@ -256,15 +229,12 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
         state = LatentDecodeState(spec)
         generated_latent_mask: list[bool] = []
         generated_answer_mask: list[bool] = []
-        generated_swapped_latent_mask: list[bool] = []
+        clean_latent_embeddings: list[torch.Tensor] = []
         latent_span_seen = False
         latent_span_complete = False
-        latent_swap_index = 0
-        forward_used_swapped_latent = False
 
         # Force hidden-state production because it is the next latent input.
         generation_config.output_hidden_states = True
-        self._apply_strict_latent_swap_prefill_mask(model_kwargs)
         outputs = self._prefill(
             input_ids,
             generation_config,
@@ -284,21 +254,12 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
                 if state.active:
                     model_inputs["input_ids"] = None
                     model_inputs["inputs_embeds"] = state.pending_embedding[:, None, :]
-                    forward_used_swapped_latent = bool(self.latent_swap_embeddings)
-                    self._apply_strict_latent_swap_mask(
-                        model_inputs,
-                        input_ids,
-                        generated_swapped_latent_mask,
-                    )
-                else:
-                    forward_used_swapped_latent = False
                 if latent_span_complete:
                     self._apply_latent_bottleneck_mask(
                         model_inputs,
                         input_ids,
                         generated_latent_mask,
                         generated_answer_mask,
-                        generated_swapped_latent_mask,
                     )
                 model_inputs["output_hidden_states"] = True
                 with self._optimize_model_for_decode():
@@ -333,24 +294,14 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
             else:
                 next_tokens = torch.argmax(next_scores, dim=-1)
 
-            if (
-                self.latent_swap_embeddings
-                and self.latent_swap_config
-                and self.latent_swap_config.get("force_latent_start")
-                and not latent_span_seen
-            ):
-                next_tokens = torch.tensor([spec.start_id], device=input_ids.device)
-
             emitted_id = state.advance(int(next_tokens.item()), current_hidden)
-            if state.active and self.latent_swap_embeddings:
-                swap_index = min(latent_swap_index, len(self.latent_swap_embeddings) - 1)
-                swap_embedding = self.latent_swap_embeddings[swap_index]
-                swap_embedding = swap_embedding.to(
-                    device=current_hidden.device,
-                    dtype=current_hidden.dtype,
-                )
-                state.pending_embedding = swap_embedding.reshape_as(current_hidden).detach()
-                latent_swap_index += 1
+            if state.active and state.pending_embedding is not None:
+                clean_pending = state.pending_embedding.detach()
+                clean_latent_embeddings.append(clean_pending)
+                state.pending_embedding = self._corrupt_latent_embedding(
+                    clean_pending,
+                    clean_latent_embeddings,
+                ).detach()
             next_tokens = torch.tensor([emitted_id], device=input_ids.device)
             was_inside_latent_span = latent_span_seen and not latent_span_complete
             emitted_is_latent = (
@@ -366,9 +317,6 @@ class LatentAwareQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGene
                 latent_span_complete = True
             generated_latent_mask.append(bool(emitted_is_latent))
             generated_answer_mask.append(bool(latent_span_complete and not emitted_is_latent))
-            generated_swapped_latent_mask.append(
-                bool(emitted_is_latent and forward_used_swapped_latent)
-            )
 
             input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
             if streamer is not None:

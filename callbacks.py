@@ -81,31 +81,6 @@ def _apply_image_mask(image: Image.Image, mask_region: dict) -> Image.Image:
     return img
 
 
-_LATENT_SWAP_END_MARKERS = (
-    "</abs_vis_token>",
-    "<|lvr_latent_end|>",
-    "<|lvr_end|>",
-)
-
-
-def _extract_swappable_latent_embeddings(result: dict) -> list[np.ndarray]:
-    """Return latent hidden states that can be fed into another latent decode."""
-    activations = result.get("activations")
-    token_types = result.get("token_types", [])
-    token_strings = result.get("token_strings", [])
-    if activations is None:
-        return []
-
-    embeddings: list[np.ndarray] = []
-    for vec, tok_type, tok_str in zip(activations, token_types, token_strings):
-        if tok_type != "latent":
-            continue
-        if any(marker in str(tok_str) for marker in _LATENT_SWAP_END_MARKERS):
-            continue
-        embeddings.append(np.asarray(vec, dtype=np.float32))
-    return embeddings
-
-
 def _execute_inference_and_update(
     image: Image.Image,
     question: str,
@@ -115,10 +90,7 @@ def _execute_inference_and_update(
     instance_prefix: str = "instance",
     mask_region: dict | None = None,
     attention_intervention: str | None = None,
-    latent_swap_embeddings: list[np.ndarray] | None = None,
-    strict_latent_swap: bool = False,
-    omit_image: bool = False,
-    extra_metadata: dict | None = None,
+    latent_corruption_mode: str | None = None,
 ) -> tuple:
     """Run inference and package results; shared by Run Inference and Run Intervention."""
     if mask_region:
@@ -129,9 +101,7 @@ def _execute_inference_and_update(
         question,
         model_name,
         attention_intervention=attention_intervention,
-        latent_swap_embeddings=latent_swap_embeddings,
-        strict_latent_swap=strict_latent_swap,
-        omit_image=omit_image,
+        latent_corruption_mode=latent_corruption_mode,
     )
     inst_id = f"{instance_prefix}_{len(existing_instances) + 1}"
 
@@ -194,8 +164,8 @@ def _execute_inference_and_update(
         result["mask_region"] = mask_region
     if attention_intervention:
         result["attention_intervention"] = attention_intervention
-    if extra_metadata:
-        result.update(extra_metadata)
+    if latent_corruption_mode:
+        result["latent_corruption_mode"] = latent_corruption_mode
 
     updated = dict(existing_instances)
     updated[inst_id] = _result_to_serialisable(
@@ -210,13 +180,13 @@ def _execute_inference_and_update(
     return updated, inst_id, n_steps - 1, 0, marks, trace_children, instance_children
 
 
-def _run_setup_message(message: str, existing_instances: dict | None) -> tuple:
-    """Return a visible run-panel message without mutating the current instances."""
+def _run_status_message(message: str, existing_instances: dict | None) -> tuple:
+    """Return a visible run-panel message without mutating current instances."""
     instances = existing_instances or {}
     active_id = next(reversed(instances), None) if instances else None
     return (
         instances,
-        no_update,
+        active_id or no_update,
         no_update,
         no_update,
         no_update,
@@ -755,20 +725,6 @@ def register_callbacks(app):
         return contents, {"display": "block"}, contents
 
     @app.callback(
-        Output("swap-source-image-preview", "src"),
-        Output("swap-source-image-preview", "style"),
-        Output("store-swap-source-image-b64", "data"),
-        Input("swap-source-image-upload", "contents"),
-        prevent_initial_call=True,
-    )
-    def preview_swap_source_image(contents):
-        if not contents:
-            raise PreventUpdate
-        img = _b64_to_pil(contents)
-        print(f"[latent-swap-upload] Source image size: {img.width}x{img.height} px")
-        return contents, {"display": "block"}, contents
-
-    @app.callback(
         Output("model-selector", "value"),
         Output("selected-model-label", "children"),
         Output({"type": "model-card", "index": ALL}, "className"),
@@ -792,13 +748,13 @@ def register_callbacks(app):
 
     @app.callback(
         Output("mask-panel", "style"),
-        Output("latent-swap-panel", "style"),
+        Output("latent-corruption-panel", "style"),
         Input("experiment-selector", "value"),
     )
     def toggle_experiment_panels(experiment_name):
         if experiment_name == "image_mask":
             return {"display": "block"}, {"display": "none"}
-        if experiment_name == "latent_swap":
+        if experiment_name == "latent_corruption":
             return {"display": "none"}, {"display": "block"}
         return {"display": "none"}, {"display": "none"}
 
@@ -913,15 +869,12 @@ def register_callbacks(app):
         State("experiment-selector",        "value"),
         State("intervention-question-input","value"),
         State("store-mask-region",          "data"),
-        State("store-swap-source-image-b64", "data"),
-        State("swap-source-question-input",  "value"),
-        State("swap-bottleneck-checkbox",    "value"),
+        State("latent-corruption-mode",     "value"),
         prevent_initial_call=True,
     )
     def run_inference(
         n_clicks, img_b64, question, model_name, existing_instances, corpus,
-        experiment_name, intervention_question, mask_region,
-        swap_source_img_b64, swap_source_question, swap_bottleneck_values,
+        experiment_name, intervention_question, mask_region, latent_corruption_mode,
     ):
         if not model_name or not img_b64 or not question:
             raise PreventUpdate
@@ -935,63 +888,21 @@ def register_callbacks(app):
         instance_prefix = "instance"
         selected_mask = None
         attention_intervention = None
+        latent_corruption = None
         if experiment_name == "latent_bottleneck":
             instance_prefix = "bottleneck"
             attention_intervention = "question_latent_answer_bottleneck"
         elif experiment_name == "image_mask":
             instance_prefix = "mask"
             selected_mask = mask_region
-        elif experiment_name == "latent_swap":
+        elif experiment_name == "latent_corruption":
             if model_name == "qwen":
-                return _run_setup_message(
-                    "Latent swap requires Monet or LVR. Qwen does not generate visual latent tokens to swap.",
+                return _run_status_message(
+                    "Latent corruption requires Monet or LVR because Qwen does not generate visual latent tokens.",
                     existing_instances,
                 )
-            if not swap_source_img_b64:
-                return _run_setup_message(
-                    "Upload a source image inside the Latent swap controls before running this experiment.",
-                    existing_instances,
-                )
-            source_image = _b64_to_pil(swap_source_img_b64)
-            source_question = (swap_source_question or "").strip() or question
-            donor_result = inf.run_inference(source_image, source_question, model_name)
-            donor_embeddings = _extract_swappable_latent_embeddings(donor_result)
-            if not donor_embeddings:
-                return _run_setup_message(
-                    "No swappable latent visual tokens were generated by the source image. "
-                    "Try another source image/question, or use Monet/LVR with a prompt that enters a latent span.",
-                    existing_instances,
-                )
-            swap_bottleneck_enabled = "enabled" in (swap_bottleneck_values or [])
-            result_tuple = _execute_inference_and_update(
-                image,
-                effective_question,
-                model_name,
-                existing_instances,
-                corpus or {},
-                instance_prefix="swap",
-                attention_intervention=(
-                    "question_latent_answer_bottleneck"
-                    if swap_bottleneck_enabled else None
-                ),
-                latent_swap_embeddings=donor_embeddings,
-                strict_latent_swap=swap_bottleneck_enabled,
-                omit_image=swap_bottleneck_enabled,
-                extra_metadata={
-                    "latent_swap_bottleneck_enabled": swap_bottleneck_enabled,
-                    "strict_latent_swap": swap_bottleneck_enabled,
-                    "strict_latent_swap_target_image_omitted": swap_bottleneck_enabled,
-                    "latent_swap_source_question": source_question,
-                    "latent_swap_source_generated_text": donor_result.get("generated_text", ""),
-                    "latent_swap_source_latent_count": len(donor_embeddings),
-                },
-            )
-            return result_tuple + ({
-                "instance_prefix": "swap",
-                "instance_id": result_tuple[1],
-                "experiment": "Latent swap",
-                "run_click": n_clicks,
-            },)
+            instance_prefix = f"corrupt_{latent_corruption_mode or 'zero'}"
+            latent_corruption = latent_corruption_mode or "zero"
         updated = _execute_inference_and_update(
             image,
             effective_question,
@@ -1001,11 +912,13 @@ def register_callbacks(app):
             instance_prefix=instance_prefix,
             mask_region=selected_mask,
             attention_intervention=attention_intervention,
+            latent_corruption_mode=latent_corruption,
         )
         success_labels = {
             "normal": "Normal inference",
             "latent_bottleneck": "Latent bottleneck",
             "image_mask": "Image mask",
+            "latent_corruption": "Latent corruption",
         }
         return updated + ({
             "instance_prefix": instance_prefix,

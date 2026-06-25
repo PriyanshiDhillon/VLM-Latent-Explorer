@@ -217,9 +217,7 @@ def run_inference(
     model_name: str,
     max_new_tokens: int = 512,
     attention_intervention: Optional[str] = None,
-    latent_swap_embeddings: Optional[list[np.ndarray]] = None,
-    strict_latent_swap: bool = False,
-    omit_image: bool = False,
+    latent_corruption_mode: Optional[str] = None,
     prefix_ids: Optional[list[int]] = None,
     prefix_activations: Optional[list[np.ndarray]] = None,
     prefix_attn: Optional[list[np.ndarray]] = None,
@@ -235,12 +233,7 @@ def run_inference(
     model_name      : 'qwen' | 'monet' | 'lvr'
     max_new_tokens  : generation budget
     attention_intervention : optional causal attention intervention mode
-    latent_swap_embeddings : optional donor latent hidden states injected
-        during the target latent phase
-    strict_latent_swap : if true, swapped latent update steps cannot attend
-        to target image patch tokens
-    omit_image : if true, build a text-only prompt while preserving the
-        provided image only for dashboard display metadata
+    latent_corruption_mode : optional 'zero' | 'mean' | 'gaussian' intervention
     prefix_ids      : if set, prepend these token ids (for edited-instance continuation)
     prefix_activations : activations from the prefix (editing case)
     prefix_attn        : attention weights from the prefix (editing case)
@@ -259,26 +252,25 @@ def run_inference(
     """
     model, processor = _get_model_and_processor(model_name)
 
-    content = [{"type": "text", "text": question}]
-    if not omit_image:
-        content.insert(0, {"type": "image", "image": image, "max_pixels": MAX_PIXELS})
-
-    messages = [{"role": "user", "content": content}]
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image", "image": image, "max_pixels": MAX_PIXELS},
+            {"type": "text", "text": question},
+        ],
+    }]
 
     text_prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
     image_inputs, video_inputs = process_vision_info(messages)
-    processor_kwargs = {
-        "text": [text_prompt],
-        "return_tensors": "pt",
-        "padding": True,
-    }
-    if image_inputs:
-        processor_kwargs["images"] = image_inputs
-    if video_inputs:
-        processor_kwargs["videos"] = video_inputs
-    inputs = processor(**processor_kwargs).to(model.device)
+    inputs = processor(
+        text=[text_prompt],
+        images=image_inputs,
+        videos=video_inputs,
+        return_tensors="pt",
+        padding=True,
+    ).to(model.device)
 
     img_w, img_h = image.size
     image_grid_thw = inputs.get("image_grid_thw")
@@ -321,24 +313,21 @@ def run_inference(
             "image_token_range": (img_token_start, img_token_end),
         }
 
-    if latent_swap_embeddings is not None:
-        if model_name == "qwen" or not hasattr(model, "latent_swap_embeddings"):
+    if latent_corruption_mode:
+        valid_modes = {"zero", "mean", "gaussian"}
+        if latent_corruption_mode not in valid_modes:
+            store.remove_hooks()
+            raise ValueError(f"Unknown latent corruption mode: {latent_corruption_mode}")
+        if model_name == "qwen" or not hasattr(model, "latent_corruption"):
             store.remove_hooks()
             raise ValueError(
-                "Latent swap requires Monet or LVR; "
-                "the baseline Qwen model has no generated visual latent tokens."
+                "Latent corruption requires Monet or LVR; "
+                "the baseline Qwen model has no generated visual latent stream."
             )
-        model.latent_swap_embeddings = [
-            torch.as_tensor(vec, device=model.device, dtype=torch.bfloat16)
-            for vec in latent_swap_embeddings
-        ]
-        if hasattr(model, "latent_swap_config"):
-            model.latent_swap_config = {
-                "strict": bool(strict_latent_swap),
-                "force_latent_start": bool(strict_latent_swap),
-                "prompt_length": input_len,
-                "image_token_range": (img_token_start, img_token_end),
-            }
+        model.latent_corruption = {
+            "mode": latent_corruption_mode,
+            "noise_scale": 1.0,
+        }
 
     print(f"[inference] Running generation for {model_name} ...")
     try:
@@ -354,10 +343,8 @@ def run_inference(
     finally:
         if attention_intervention and hasattr(model, "latent_attention_intervention"):
             model.latent_attention_intervention = None
-        if latent_swap_embeddings is not None and hasattr(model, "latent_swap_embeddings"):
-            model.latent_swap_embeddings = None
-        if latent_swap_embeddings is not None and hasattr(model, "latent_swap_config"):
-            model.latent_swap_config = None
+        if latent_corruption_mode and hasattr(model, "latent_corruption"):
+            model.latent_corruption = None
         store.remove_hooks()
     print(f"[inference] Finished generation for {model_name} ...")
 
@@ -410,9 +397,7 @@ def run_inference(
         "image_grid_hw":  (grid_h, grid_w),
         "image_token_range": (img_token_start, img_token_end),
         "attention_intervention": attention_intervention,
-        "latent_swap_embedding_count": len(latent_swap_embeddings or []),
-        "strict_latent_swap": bool(strict_latent_swap),
-        "omit_image": bool(omit_image),
+        "latent_corruption_mode": latent_corruption_mode,
     }
 
 

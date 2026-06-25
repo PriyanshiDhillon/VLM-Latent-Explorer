@@ -33,9 +33,15 @@ EXPERIMENT_OPTIONS = [
         "value": "image_mask",
     },
     {
-        "label": "Latent swap",
-        "value": "latent_swap",
+        "label": "Latent corruption",
+        "value": "latent_corruption",
     },
+]
+
+LATENT_CORRUPTION_OPTIONS = [
+    {"label": "Zero substitution", "value": "zero"},
+    {"label": "Mean substitution", "value": "mean"},
+    {"label": "Gaussian noise", "value": "gaussian"},
 ]
 
 
@@ -171,48 +177,22 @@ def input_panel() -> html.Div:
                 ],
             ),
             html.Div(
-                id="latent-swap-panel",
-                className="latent-swap-panel",
+                id="latent-corruption-panel",
+                className="latent-corruption-panel",
                 style={"display": "none"},
                 children=[
-                    html.Div("Source image for swapped latents", className="input-label input-label-muted"),
+                    html.Div("Latent token intervention", className="input-label input-label-muted"),
                     html.Div(
-                        "The model generates visual latents from this source image, then injects them while answering for the main image.",
+                        "Generate visual latents, corrupt the continuous stream, then let the answer decode from it. Mean uses the running mean of this generation's latent states.",
                         className="experiment-note",
                     ),
-                    dcc.Upload(
-                        id="swap-source-image-upload",
-                        children=html.Div(["Drag & Drop source image or ", html.A("select file", className="upload-link")]),
-                        className="upload-box mb-2",
-                    ),
-                    html.Img(
-                        id="swap-source-image-preview",
-                        className="preview-img mb-2",
-                        style={"display": "none"},
-                    ),
-                    html.Div("Source question", className="input-label input-label-muted"),
-                    dbc.Textarea(
-                        id="swap-source-question-input",
-                        placeholder="Leave empty to reuse the main question...",
-                        rows=2,
-                        className="question-input",
-                    ),
-                    dcc.Checklist(
-                        id="swap-bottleneck-checkbox",
-                        options=[
-                            {
-                                "label": "Enable Latent Bottleneck Masking",
-                                "value": "enabled",
-                            }
-                        ],
-                        value=["enabled"],
-                        className="swap-bottleneck-check",
-                        inputClassName="swap-bottleneck-input",
-                        labelClassName="swap-bottleneck-label",
-                    ),
-                    html.Div(
-                        "When enabled, the target image is removed from target generation; answer text receives only the question, source-derived latents, and answer history.",
-                        className="experiment-note swap-bottleneck-note",
+                    dcc.RadioItems(
+                        id="latent-corruption-mode",
+                        options=LATENT_CORRUPTION_OPTIONS,
+                        value="zero",
+                        className="latent-corruption-radio",
+                        inputClassName="latent-corruption-input",
+                        labelClassName="latent-corruption-label",
                     ),
                 ],
             ),
@@ -757,7 +737,6 @@ def build_layout() -> html.Div:
             dcc.Store(id="store-active-instance", data=None),
             dcc.Store(id="store-corpus-embeddings", data={}),
             dcc.Store(id="store-current-image-b64", data=None),
-            dcc.Store(id="store-swap-source-image-b64", data=None),
             dcc.Store(id="store-active-projection", data="umap"),
             dcc.Store(id="store-umap-base", data=None),
             dcc.Store(id="store-mask-region", data=None),

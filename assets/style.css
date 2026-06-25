@@ -1024,6 +1024,38 @@ html, body {
   margin-top: 10px;
 }
 
+.latent-corruption-panel {
+  margin-top: 14px;
+}
+
+.latent-corruption-radio {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.latent-corruption-label {
+  display: flex !important;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(30,53,48,0.12);
+  background: linear-gradient(135deg, rgba(255,255,255,0.74), rgba(201,168,76,0.14));
+  color: var(--text-primary);
+  font-weight: 850;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.68);
+  cursor: pointer;
+}
+
+.latent-corruption-input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent-gold);
+  cursor: pointer;
+}
+
 .mask-image-graph {
   width: 100%;
   height: 360px;
@@ -1036,40 +1068,6 @@ html, body {
 .mask-image-graph .svg-container {
   width: 100% !important;
   height: 100% !important;
-}
-
-.latent-swap-panel {
-  margin-top: 12px;
-}
-
-.swap-bottleneck-check {
-  margin-top: 14px;
-}
-
-.swap-bottleneck-label {
-  display: flex !important;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 12px 14px;
-  border-radius: 18px;
-  border: 1px solid rgba(30,53,48,0.12);
-  background: linear-gradient(135deg, rgba(255,255,255,0.72), rgba(201,168,76,0.18));
-  color: var(--text-primary);
-  font-weight: 850;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.68);
-  cursor: pointer;
-}
-
-.swap-bottleneck-input {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--accent-gold);
-  cursor: pointer;
-}
-
-.swap-bottleneck-note {
-  margin-top: 8px;
 }
 
 .intervention-trace {
