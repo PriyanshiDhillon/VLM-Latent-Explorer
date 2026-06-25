@@ -80,7 +80,7 @@ python app.py
 Within Windows PowerShell (locally) run. Replace `scur0239` with your own scur and `gcn54` with the allocated node:
 
 ```bash
-ssh -L 8050:127.0.0.1:8050 -J scur0239@snellius.surf.nl scur0239@gcn54
+ssh -L 9000:127.0.0.1:9000 -J scur0265@snellius.surf.nl scur0265@gcn40
 ```
 
 Now it should show if you open it in browser on: `localhost:8050`

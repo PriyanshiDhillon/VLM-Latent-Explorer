@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -27,7 +28,11 @@ except ImportError:  # Older/newer transformers builds may expose only Auto clas
 
 ROOT = PROJECT_ROOT
 DATA_PATH = ROOT / "data" / "subset" / "metadata.json"
-OUTPUT_ROOT = ROOT / "precomputed" / "corpus_embeddings"
+PRECOMPUTED_ROOT = Path(os.environ.get("PRECOMPUTED_DIR", "precomputed"))
+if not PRECOMPUTED_ROOT.is_absolute():
+    PRECOMPUTED_ROOT = ROOT / PRECOMPUTED_ROOT
+OUTPUT_ROOT = PRECOMPUTED_ROOT / "corpus_embeddings"
+
 
 MODEL_PATHS = {
     "qwen": ROOT / "model" / "Qwen2.5-VL-7B-Instruct",

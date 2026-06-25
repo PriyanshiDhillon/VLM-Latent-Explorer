@@ -28,6 +28,8 @@ from backend import projection as proj
 from backend import data_loader as dl
 from backend import inference as inf
 from backend import token_attention as token_attn
+from backend import token_alignment
+from backend import representation_comparison
 
 import plotly.graph_objects as go
 
@@ -87,16 +89,21 @@ def _execute_inference_and_update(
     corpus: dict,
     instance_prefix: str = "instance",
     mask_region: dict | None = None,
+    attention_intervention: str | None = None,
 ) -> tuple:
     """Run inference and package results; shared by Run Inference and Run Intervention."""
     if mask_region:
         image = _apply_image_mask(image, mask_region)
 
-    result = inf.run_inference(image, question, model_name)
-    result["model_name"] = model_name
+    result = inf.run_inference(
+        image,
+        question,
+        model_name,
+        attention_intervention=attention_intervention,
+    )
     inst_id = f"{instance_prefix}_{len(existing_instances) + 1}"
 
-    cache_dir = Path("precomputed/online_cache") / model_name
+    cache_dir = dl.PRECOMPUTED_DIR / "online_cache" / model_name
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     np.savez(
@@ -126,12 +133,17 @@ def _execute_inference_and_update(
     if dl.umap_model_exists(model_name):
         try:
             result["coords_2d"] = proj.project_onto_manifold(result["activations"], model_name)
+            result["trustworthiness_scores"] = proj.compute_neighborhood_preservation_scores(
+                result["activations"], result["coords_2d"]
+            )
         except Exception as exc:
             result["coords_2d"] = None
+            result["trustworthiness_scores"] = None
             result["projection_error"] = str(exc)
             print(f"[projection] {model_name}/{inst_id}: {exc}")
     else:
         result["coords_2d"] = None
+        result["trustworthiness_scores"] = None
 
     nearest_text: list = [None] * len(result["token_types"])
     if result.get("coords_2d") is not None and corpus and corpus.get("coords") and corpus.get("labels"):
@@ -148,6 +160,8 @@ def _execute_inference_and_update(
 
     if mask_region:
         result["mask_region"] = mask_region
+    if attention_intervention:
+        result["attention_intervention"] = attention_intervention
 
     updated = dict(existing_instances)
     updated[inst_id] = _result_to_serialisable(
@@ -185,6 +199,21 @@ def _result_from_serialisable(result: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def _load_online_cache_activations(model_name: str | None, instance_id: str | None) -> np.ndarray | None:
+    if not model_name or not instance_id:
+        return None
+
+    cache_path = dl.PRECOMPUTED_DIR / "online_cache" / model_name / f"{instance_id}.npz"
+    if not cache_path.exists():
+        return None
+
+    try:
+        with np.load(cache_path, allow_pickle=True) as data:
+            return np.array(data["activations"])
+    except Exception:
+        return None
 
 def _passage(example_id):
     """Map an example id like 'example_000007' to a 1-based passage number (8)."""
@@ -464,18 +493,9 @@ def _build_umap_figure(
     # ── Instance traces ──────────────────────────────────────────────────────
     # Uniform appearance — no step-specific star/size. update_umap_step patches these.
     active_type_traces: dict[str, dict] = {}
-    active_model = None
-    if active_id and active_id in instances:
-        _ar = _result_from_serialisable(instances[active_id])
-        active_model = _ar.get("model_name")
     if show_trace:
         for idx, (inst_id, inst_data) in enumerate(instances.items()):
             result = _result_from_serialisable(inst_data)
-            # Instances from a different model live in a different UMAP coordinate space
-            # and cannot be meaningfully overlaid on this one.
-            inst_model = result.get("model_name")
-            if active_model and inst_model and inst_model != active_model:
-                continue
             coords_2d = result.get("coords_2d")
             if coords_2d is None or len(coords_2d) == 0:
                 continue
@@ -685,6 +705,37 @@ def register_callbacks(app):
         return contents, {"display": "block"}, contents
 
     @app.callback(
+        Output("model-selector", "value"),
+        Output("selected-model-label", "children"),
+        Output({"type": "model-card", "index": ALL}, "className"),
+        Input({"type": "model-card", "index": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def choose_model_from_card(n_clicks):
+        if not ctx.triggered_id or not ctx.triggered or not ctx.triggered[0]["value"]:
+            raise PreventUpdate
+        selected = ctx.triggered_id["index"]
+        model_labels = {
+            "qwen": "Selected: Qwen2.5-VL",
+            "monet": "Selected: Monet-7B",
+            "lvr": "Selected: LVR",
+        }
+        classes = [
+            "model-card model-card--active" if model == selected else "model-card"
+            for model in ("qwen", "monet", "lvr")
+        ]
+        return selected, model_labels.get(selected, f"Selected: {selected}"), classes
+
+    @app.callback(
+        Output("mask-panel", "style"),
+        Input("experiment-selector", "value"),
+    )
+    def toggle_mask_panel(experiment_name):
+        if experiment_name == "image_mask":
+            return {"display": "block"}
+        return {"display": "none"}
+
+    @app.callback(
         Output("question-input", "value"),
         Output("uploaded-image-preview", "src", allow_duplicate=True),
         Output("store-current-image-b64", "data", allow_duplicate=True),
@@ -736,17 +787,9 @@ def register_callbacks(app):
     @app.callback(
         Output("store-corpus-embeddings", "data"),
         Input("model-selector", "value"),
-        Input("store-active-instance", "data"),
-        State("store-instances", "data"),
     )
-    def reload_corpus(model_name, active_id, instances):
-        # Always use the active instance's model when one exists — the corpus
-        # must match the coordinate space of the displayed instance.
-        if active_id and instances and active_id in instances:
-            inst_model = (instances[active_id] or {}).get("model_name")
-            if inst_model:
-                model_name = inst_model
-        if not model_name or not dl.corpus_embeddings_exist(model_name):
+    def reload_corpus(model_name):
+        if not dl.corpus_embeddings_exist(model_name):
             return {}
         try:
             corpus = dl.load_corpus_embeddings(model_name)
@@ -775,14 +818,42 @@ def register_callbacks(app):
         State("model-selector",            "value"),
         State("store-instances",           "data"),
         State("store-corpus-embeddings",   "data"),
+        State("experiment-selector",        "value"),
+        State("intervention-question-input","value"),
+        State("store-mask-region",          "data"),
         prevent_initial_call=True,
     )
-    def run_inference(n_clicks, img_b64, question, model_name, existing_instances, corpus):
+    def run_inference(
+        n_clicks, img_b64, question, model_name, existing_instances, corpus,
+        experiment_name, intervention_question, mask_region,
+    ):
         if not model_name or not img_b64 or not question:
             raise PreventUpdate
+        experiment_name = experiment_name or "normal"
+        effective_question = (
+            (intervention_question or "").strip()
+            if experiment_name in ("latent_bottleneck", "image_mask")
+            else ""
+        ) or question
         image = _b64_to_pil(img_b64)
+        instance_prefix = "instance"
+        selected_mask = None
+        attention_intervention = None
+        if experiment_name == "latent_bottleneck":
+            instance_prefix = "bottleneck"
+            attention_intervention = "question_latent_answer_bottleneck"
+        elif experiment_name == "image_mask":
+            instance_prefix = "mask"
+            selected_mask = mask_region
         return _execute_inference_and_update(
-            image, question, model_name, existing_instances, corpus or {},
+            image,
+            effective_question,
+            model_name,
+            existing_instances,
+            corpus or {},
+            instance_prefix=instance_prefix,
+            mask_region=selected_mask,
+            attention_intervention=attention_intervention,
         )
 
     @app.callback(
@@ -845,14 +916,14 @@ def register_callbacks(app):
         State("store-instances",           "data"),
         State("store-active-projection",   "data"),
         State("store-current-image-b64",   "data"),
+        State("model-selector",            "value"),
         prevent_initial_call=True,
     )
-    def update_views(step, active_id, instances, projection_mode, img_b64):
+    def update_views(step, active_id, instances, projection_mode, img_b64, model_name):
         if not active_id or active_id not in instances:
             raise PreventUpdate
 
         result = _result_from_serialisable(instances[active_id])
-        model_name = result.get("model_name", "unknown")
         attn_list = result.get("attn_weights", [])
         grid_hw   = tuple(result.get("image_grid_hw", (16, 16)))
 
@@ -1106,8 +1177,76 @@ def register_callbacks(app):
         if attn_list and step < len(attn_list) and attn_list[step] is not None:
             attn_at_step = np.array(attn_list[step])
 
-        stats = proj.compute_selection_stats(selected_types, attn_at_step, [])
-        return [_stat_row(k, str(v)) for k, v in stats.items()]
+        trust_scores = result.get("trustworthiness_scores")
+
+        stats = proj.compute_selection_stats(
+            selected_types,
+            attn_at_step,
+            [],
+            selection_indices=selected_indices,
+            trust_scores=trust_scores,
+        )
+
+        # Map internal metric keys → human-friendly labels for the website.
+        label_map = {
+            # counts
+            "total_points": "Total points",
+            "text_count": "Text count",
+            "visual_count": "Visual count",
+            "latent_count": "Latent count",
+            "text_pct": "Text %",
+            "visual_pct": "Visual %",
+            "latent_pct": "Latent %",
+
+            # attention entropy (overall)
+            "attention_entropy_mean": "Attention entropy (mean)",
+            "attention_entropy_std": "Attention entropy (std)",
+
+            # attention entropy (by type)
+            "text_attention_entropy_mean": "Attention entropy (text mean)",
+            "text_attention_entropy_std": "Attention entropy (text std)",
+            "text_attention_entropy_min": "Attention entropy (text min)",
+            "text_attention_entropy_max": "Attention entropy (text max)",
+
+            "latent_attention_entropy_mean": "Attention entropy (latent mean)",
+            "latent_attention_entropy_std": "Attention entropy (latent std)",
+            "latent_attention_entropy_min": "Attention entropy (latent min)",
+            "latent_attention_entropy_max": "Attention entropy (latent max)",
+
+            # nearest-corpus distance
+            "mean_nearest_corpus_text_distance": "Mean nearest-corpus text distance",
+            "nearest_corpus_text_distance_std": "Nearest-corpus text distance (std)",
+            "nearest_corpus_text_distance_min": "Nearest-corpus text distance (min)",
+            "nearest_corpus_text_distance_max": "Nearest-corpus text distance (max)",
+            "text_mean_nearest_corpus_text_distance": "Text mean nearest-corpus text distance",
+            "latent_mean_nearest_corpus_text_distance": "Latent mean nearest-corpus text distance",
+
+            # projection dispersion / preservation
+            "selection_activation_pairwise_distance_mean": "Selection activation pairwise distance (mean)",
+            "selection_activation_pairwise_distance_std": "Selection activation pairwise distance (std)",
+            "selection_activation_pairwise_distance_min": "Selection activation pairwise distance (min)",
+            "selection_activation_pairwise_distance_max": "Selection activation pairwise distance (max)",
+
+            "selection_projection_pairwise_distance_mean": "Selection 2D projection pairwise distance (mean)",
+            "selection_projection_pairwise_distance_std": "Selection 2D projection pairwise distance (std)",
+            "selection_projection_pairwise_distance_min": "Selection 2D projection pairwise distance (min)",
+            "selection_projection_pairwise_distance_max": "Selection 2D projection pairwise distance (max)",
+            "selection_projection_to_activation_distance_ratio": "2D/activation distance ratio",
+
+            # trustworthiness
+            "mean_trustworthiness": "Mean uncertainty",
+            "median_trustworthiness": "Median uncertainty",
+            "trustworthiness_std": "Uncertainty (std)",
+        }
+
+        # Render all metrics; unknown keys fall back to their original name.
+        rows = []
+        for k, v in stats.items():
+            display_label = label_map.get(k, k)
+            rows.append(_stat_row(display_label, str(v)))
+        return rows
+
+
 
     @app.callback(
         Output("store-active-instance", "data", allow_duplicate=True),
@@ -1143,6 +1282,105 @@ def register_callbacks(app):
 
 
     # ── Mask graph: render uploaded image so user can draw a selection ────────
+    @app.callback(
+        Output("comparison-instance-selector", "options"),
+        Output("comparison-instance-selector", "value"),
+        Input("store-instances", "data"),
+        Input("store-active-instance", "data"),
+        State("comparison-instance-selector", "value"),
+    )
+    def update_comparison_instance_options(instances, active_id, selected_id):
+        options = [{"label": key, "value": key} for key in (instances or {}) if key != active_id]
+        valid = {option["value"] for option in options}
+        if selected_id not in valid:
+            selected_id = options[0]["value"] if options else None
+        return options, selected_id
+
+    @app.callback(
+        Output("token-comparison-display", "children"),
+        Input("step-slider", "value"),
+        Input("store-active-instance", "data"),
+        Input("comparison-instance-selector", "value"),
+        Input("store-instances", "data"),
+        State("model-selector", "value"),
+    )
+    def update_token_comparison(step, active_id, reference_id, instances, model_name):
+        if not active_id or not reference_id or not instances:
+            return html.Div("Run an intervention to compare generated tokens.", className="comparison-placeholder")
+        if active_id not in instances or reference_id not in instances:
+            raise PreventUpdate
+        current, reference = instances[active_id], instances[reference_id]
+        alignment = token_alignment.align_token_sequences(
+            current.get("token_strings", []), reference.get("token_strings", []),
+            current.get("token_types", []), reference.get("token_types", []))
+
+        def load_activations(instance_id):
+            path = dl.PRECOMPUTED_DIR / "online_cache" / str(model_name) / f"{instance_id}.npz"
+            try:
+                with np.load(path, allow_pickle=False) as cached:
+                    return np.asarray(cached["activations"], dtype=np.float32)
+            except (OSError, KeyError, ValueError):
+                return None
+
+        current_activations = load_activations(active_id)
+        reference_activations = load_activations(reference_id)
+        for row in alignment:
+            ci, ri = row["current_index"], row["reference_index"]
+            row["representation_change"] = None
+            if (current_activations is not None and reference_activations is not None
+                    and ci is not None and ri is not None
+                    and ci < len(current_activations) and ri < len(reference_activations)):
+                row["representation_change"] = representation_comparison.cosine_change(
+                    current_activations[ci], reference_activations[ri])
+        representation_changes = [row["representation_change"] for row in alignment
+                                  if row["representation_change"] is not None]
+        step = int(step or 0)
+        selected = next((row for row in alignment if row["current_index"] == step), None)
+        counts = {op: sum(row["operation"] == op for row in alignment)
+                  for op in ("match", "replace", "insert", "delete")}
+        if selected:
+            ref_label = (f"step {selected['reference_index']}: {selected['reference_token']!r}"
+                         if selected["reference_index"] is not None else "no corresponding token")
+            current_summary = html.Div([
+                html.Strong(f"Current step {step}: {selected['current_token']!r}"),
+                html.Span("->", className="comparison-arrow"), html.Strong(f"{reference_id} {ref_label}"),
+                html.Span(selected["operation"].upper(),
+                          className=f"comparison-status comparison-status--{selected['operation']}"),
+                html.Span(
+                    f"Hidden-state change: {selected['representation_change']:.3f}"
+                    if selected["representation_change"] is not None else "Hidden-state change unavailable",
+                    className="comparison-hidden-change"),
+            ], className="comparison-current-summary")
+        else:
+            current_summary = html.Div("Current step could not be aligned.")
+        summary = html.Div([
+            html.Span(f"Current: {active_id}", className="comparison-instance-name"),
+            html.Span(f"Reference: {reference_id}", className="comparison-instance-name"),
+            *[html.Span(f"{op.title()} {counts[op]}", className=f"comparison-count comparison-count--{op}")
+              for op in ("match", "replace", "insert", "delete")],
+            html.Span(f"Mean hidden-state change {np.mean(representation_changes):.3f}",
+                      className="comparison-count comparison-count--representation")
+            if representation_changes else html.Span("Hidden states unavailable", className="comparison-count"),
+        ], className="comparison-summary")
+        rows = []
+        for row in alignment:
+            ci = "-" if row["current_index"] is None else str(row["current_index"])
+            ri = "-" if row["reference_index"] is None else str(row["reference_index"])
+            ct = "[none]" if row["current_token"] is None else repr(row["current_token"])
+            rt = "[none]" if row["reference_token"] is None else repr(row["reference_token"])
+            change = row["representation_change"]
+            status_label = row["operation"] if change is None else f"{row['operation']} | d={change:.3f}"
+            rows.append(html.Div([
+                html.Span(ci, className="comparison-step"), html.Span(ct, className="comparison-token"),
+                html.Span("->", className="comparison-arrow"),
+                html.Span(ri, className="comparison-step"), html.Span(rt, className="comparison-token"),
+                html.Span(status_label, title="1 - cosine similarity of the original hidden-state vectors",
+                          className=f"comparison-status comparison-status--{row['operation']}"),
+            ], className="comparison-row comparison-row--active"
+               if row["current_index"] == step else "comparison-row"))
+        return html.Div([summary, current_summary, html.Div(rows, className="comparison-list")])
+
+
     @app.callback(
         Output("mask-image-graph", "figure"),
         Input("store-current-image-b64", "data"),
@@ -1248,6 +1486,7 @@ def register_callbacks(app):
                 existing_instances, corpus or {},
                 instance_prefix="intervention",
                 mask_region=mask_region,
+                attention_intervention="question_latent_answer_bottleneck",
             )
         return trace_children, updated, inst_id, max_step, val, marks, instance_children
 
@@ -1450,16 +1689,37 @@ def _build_uncertainty_display(result: dict, current_step: int):
     scores = result.get("trustworthiness_scores")   # list[float] | None
     token_types = result.get("token_types", [])
 
-    if not scores:
+    if scores is None or len(scores) == 0:
         return html.Div(
             "Uncertainty scores not available for this run.",
             className="stat-row",
             style={"color": "#9ca3af", "fontStyle": "italic"},
         )
 
+    scores = [float(score) for score in scores]
+    selected_score = scores[current_step] if 0 <= current_step < len(scores) else None
+    mean_score = float(np.mean(scores))
+    summary = html.Div(
+        [
+            html.Span(
+                f"Current: {selected_score:.2f}"
+                if selected_score is not None
+                else "Current: n/a"
+            ),
+            html.Span(f"Mean: {mean_score:.2f}", style={"marginLeft": "16px"}),
+        ],
+        className="stat-row",
+        title="Fraction of nearest neighbours preserved after projection to 2D.",
+    )
+
     items = []
     for i, (score, ttype) in enumerate(zip(scores, token_types)):
-        color = TOKEN_COLORS.get(ttype, "#6b7280")
+        if score >= 0.75:
+            color = "#22c55e"
+        elif score >= 0.5:
+            color = "#f59e0b"
+        else:
+            color = "#ef4444"
         is_current = i == current_step
         bar_width = f"{max(4, int(score * 100))}%"
         items.append(
@@ -1468,7 +1728,7 @@ def _build_uncertainty_display(result: dict, current_step: int):
                     "uncertainty-token uncertainty-token--active"
                     if is_current else "uncertainty-token"
                 ),
-                title=f"Step {i} | {ttype} | trust={score:.2f}",
+                title=f"Step {i} | {ttype} | neighbour preservation={score:.2f}",
                 children=[
                     html.Div(
                         style={
@@ -1483,4 +1743,6 @@ def _build_uncertainty_display(result: dict, current_step: int):
                 ],
             )
         )
-    return html.Div(items, className="uncertainty-bar-strip")
+    return html.Div(
+        [summary, html.Div(items, className="uncertainty-bar-strip")]
+    )
