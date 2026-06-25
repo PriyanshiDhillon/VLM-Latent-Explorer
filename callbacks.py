@@ -1173,11 +1173,11 @@ def register_callbacks(app):
         Output("token-context-panel", "children"),
         Input("step-slider",            "value"),
         Input("store-active-instance",  "data"),
+        Input("store-corpus-embeddings","data"),
         State("store-instances",        "data"),
-        State("store-corpus-embeddings","data"),
         prevent_initial_call=True,
     )
-    def update_token_context(step, active_id, instances, corpus):
+    def update_token_context(step, active_id, corpus, instances):
         if not active_id or active_id not in instances:
             raise PreventUpdate
 
@@ -1191,7 +1191,7 @@ def register_callbacks(app):
         current_type  = token_types[step]   if step < len(token_types)   else "text"
 
         neighbors = []
-        if (coords_2d is not None and corpus
+        if (coords_2d is not None and step < len(coords_2d) and corpus
                 and corpus.get("coords") and corpus.get("labels")):
             query_coord      = np.array(coords_2d)[step]
             corpus_coords_arr = np.array(corpus["coords"], dtype=np.float32)
@@ -1215,9 +1215,10 @@ def register_callbacks(app):
         State("store-active-instance", "data"),
         State("store-instances",       "data"),
         State("step-slider",           "value"),
+        State("model-selector",        "value"),
         prevent_initial_call=True,
     )
-    def update_stats(selected_data, highlight_mode, active_id, instances, step):
+    def update_stats(selected_data, highlight_mode, active_id, instances, step, model_name):
         if not selected_data or not selected_data.get("points"):
             raise PreventUpdate
         if not active_id or active_id not in instances:
@@ -1235,7 +1236,10 @@ def register_callbacks(app):
             and pt["customdata"][0] == active_id
         ]
         if not selected_indices:
-            raise PreventUpdate
+            return html.Div(
+                "Selection contains only corpus/background points. Box-select the current trace points to compute token statistics.",
+                style={"color": "#9ca3af", "fontStyle": "italic"},
+            )
 
         if coords_2d is not None:
             n = len(coords_2d)
@@ -1249,6 +1253,8 @@ def register_callbacks(app):
             attn_at_step = np.array(attn_list[step])
 
         trust_scores = result.get("trustworthiness_scores")
+        activations = _load_online_cache_activations(model_name, active_id)
+        nearest_text = result.get("nearest_text")
 
         stats = proj.compute_selection_stats(
             selected_types,
@@ -1256,6 +1262,9 @@ def register_callbacks(app):
             [],
             selection_indices=selected_indices,
             trust_scores=trust_scores,
+            activations=activations,
+            coords_2d=coords_2d,
+            nearest_text=nearest_text,
         )
 
         # Map internal metric keys → human-friendly labels for the website.
@@ -1649,7 +1658,7 @@ def _build_token_context_panel(current_token: str, current_type: str, neighbors:
         return html.Div([
             header,
             html.Div(
-                "No corpus data — run the offline pipeline to enable neighbour lookup.",
+                "No nearest corpus text neighbours found. Check that precomputed corpus_2d_<model>.npz exists and includes text tokens.",
                 style={"color": "#9ca3af", "fontStyle": "italic", "fontSize": "0.78rem"},
             ),
         ])
@@ -1761,8 +1770,9 @@ def _build_uncertainty_display(result: dict, current_step: int):
     token_types = result.get("token_types", [])
 
     if scores is None or len(scores) == 0:
+        message = result.get("projection_error") or "Uncertainty scores not available for this run. Projection may not have run."
         return html.Div(
-            "Uncertainty scores not available for this run.",
+            message,
             className="stat-row",
             style={"color": "#9ca3af", "fontStyle": "italic"},
         )

@@ -22,6 +22,17 @@ if not PRECOMPUTED_DIR.is_absolute():
 MAX_LEGACY_UMAP_BYTES = 512 * 1024 * 1024
 
 
+def normalise_token_type(token_type) -> str:
+    """Return a stable token type label from corpus/dashboard variants."""
+    if token_type is None:
+        return ""
+    if isinstance(token_type, bytes):
+        token_type = token_type.decode("utf-8", errors="ignore")
+    label = str(token_type).strip().lower()
+    if ":" in label:
+        label = label.rsplit(":", 1)[-1]
+    return label
+
 def project_onto_manifold(activations: np.ndarray, model_name: str) -> np.ndarray:
     """
     Project new activations (T, D) onto the precomputed UMAP manifold.
@@ -185,8 +196,9 @@ def compute_selection_stats(
     """
     counts = {"text": 0, "visual": 0, "latent": 0}
     for t in token_types:
-        if t in counts:
-            counts[t] += 1
+        t_norm = normalise_token_type(t)
+        if t_norm in counts:
+            counts[t_norm] += 1
 
     total = sum(counts.values())
     stats = {
@@ -285,6 +297,7 @@ def compute_selection_stats(
                 continue
             distance = float(distance)
             selected_distances.append(distance)
+            token_type = normalise_token_type(token_type)
             if token_type in selected_by_type:
                 selected_by_type[token_type].append(distance)
 
@@ -329,7 +342,7 @@ def find_k_nearest_text_neighbors(
     """Return the k nearest corpus text tokens to a single 2D query point."""
     from scipy.spatial import cKDTree
 
-    text_indices = [i for i, t in enumerate(corpus_types) if t == "text"]
+    text_indices = [i for i, t in enumerate(corpus_types) if normalise_token_type(t) == "text"]
     if not text_indices or query_coord is None:
         return []
 
@@ -381,7 +394,7 @@ def find_nearest_text_neighbors(
     """
     from scipy.spatial import cKDTree
 
-    text_indices = [i for i, t in enumerate(corpus_types) if t == "text"]
+    text_indices = [i for i, t in enumerate(corpus_types) if normalise_token_type(t) == "text"]
     if not text_indices or len(query_coords) == 0:
         return [None] * len(query_coords)
 
