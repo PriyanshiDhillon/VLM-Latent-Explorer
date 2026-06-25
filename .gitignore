@@ -30,3 +30,5 @@ MMA_Intermediate_Report_J (2).pdf
 *.outprecomputed/
 
 *.out
+*.npy
+*.npz

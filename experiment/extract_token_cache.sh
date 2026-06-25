@@ -14,8 +14,7 @@ module load Anaconda3/2025.06-1
 
 source activate vlm-latent
 
-cd $HOME/VLM-Latent-Explorer/experiment
+cd "$HOME/VLM-Latent-Explorer-Davide/experiment"
 
 # Start small. After this succeeds, increase --limit or use --model all.
-python extract_token_cache.py --model all --limit 50 --max-new-tokens 128
-
+python extract_token_cache.py --model all --limit 50 --max-new-tokens 128 --overwrite

@@ -12,7 +12,7 @@ module purge
 module load 2025
 module load Anaconda3/2025.06-1
 
-cd $HOME/VLM-Latent-Explorer/data
+cd "$HOME/VLM-Latent-Explorer-Davide/data"
 
 python -m pip install --user -U datasets huggingface_hub pillow
 

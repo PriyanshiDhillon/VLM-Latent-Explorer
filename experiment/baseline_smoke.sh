@@ -12,5 +12,5 @@ module purge
 module load 2025
 module load Anaconda3/2025.06-1
 
-cd $HOME/VLM-Latent-Explorer/experiment
+cd "$HOME/VLM-Latent-Explorer-Davide/experiment"
 python baseline_smoke.py

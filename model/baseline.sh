@@ -12,7 +12,7 @@ module purge
 module load 2025
 module load Anaconda3/2025.06-1
 
-cd $HOME/VLM-Latent-Explorer/model
+cd "$HOME/VLM-Latent-Explorer-Davide/model"
 
 hf download Qwen/Qwen2.5-VL-7B-Instruct \
   --local-dir Qwen2.5-VL-7B-Instruct

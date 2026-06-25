@@ -15,6 +15,6 @@ module load Anaconda3/2025.06-1
 conda create -n vlm-latent python=3.10 -y
 source activate vlm-latent
 
-cd ~/VLM-Latent-Explorer
+cd "$HOME/VLM-Latent-Explorer-Davide"
 pip install --upgrade pip
 pip install -r requirements.txt

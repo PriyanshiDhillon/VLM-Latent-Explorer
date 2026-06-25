@@ -14,7 +14,7 @@ module load Anaconda3/2025.06-1
 
 source activate vlm-latent
 
-cd $HOME/VLM-Latent-Explorer/model
+cd "$HOME/VLM-Latent-Explorer-Davide/model"
 
 hf download NOVAglow646/Monet-7B \
   --local-dir Monet-7B

@@ -81,7 +81,8 @@ def _get_model_and_processor(model_name: str):
             spec = model.latent_decoding
             print(
                 f"[inference] Enabled {model_name} latent decoding "
-                f"(start={spec.start_id}, latent={spec.placeholder_id}, end={spec.end_id})"
+                f"(start={spec.start_id}, latent={spec.placeholder_id}, "
+                f"latent_end={spec.latent_end_id or spec.end_id}, end={spec.end_id})"
             )
         model.eval()
         _model_cache[model_name] = model
@@ -179,7 +180,7 @@ def _classify_token_types(
         latent_end = tokenizer.convert_tokens_to_ids("</abs_vis_token>")
     elif model_name == "lvr":
         latent_start = tokenizer.convert_tokens_to_ids("<|lvr_start|>")
-        latent_end = tokenizer.convert_tokens_to_ids("<|lvr_end|>")
+        latent_end = tokenizer.convert_tokens_to_ids("<|lvr_latent_end|>")
     else:
         latent_start = latent_end = None
 
@@ -216,6 +217,9 @@ def run_inference(
     model_name: str,
     max_new_tokens: int = 512,
     attention_intervention: Optional[str] = None,
+    latent_swap_embeddings: Optional[list[np.ndarray]] = None,
+    strict_latent_swap: bool = False,
+    omit_image: bool = False,
     prefix_ids: Optional[list[int]] = None,
     prefix_activations: Optional[list[np.ndarray]] = None,
     prefix_attn: Optional[list[np.ndarray]] = None,
@@ -231,6 +235,12 @@ def run_inference(
     model_name      : 'qwen' | 'monet' | 'lvr'
     max_new_tokens  : generation budget
     attention_intervention : optional causal attention intervention mode
+    latent_swap_embeddings : optional donor latent hidden states injected
+        during the target latent phase
+    strict_latent_swap : if true, swapped latent update steps cannot attend
+        to target image patch tokens
+    omit_image : if true, build a text-only prompt while preserving the
+        provided image only for dashboard display metadata
     prefix_ids      : if set, prepend these token ids (for edited-instance continuation)
     prefix_activations : activations from the prefix (editing case)
     prefix_attn        : attention weights from the prefix (editing case)
@@ -249,27 +259,26 @@ def run_inference(
     """
     model, processor = _get_model_and_processor(model_name)
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image, "max_pixels": MAX_PIXELS},
-                {"type": "text",  "text": question},
-            ],
-        }
-    ]
+    content = [{"type": "text", "text": question}]
+    if not omit_image:
+        content.insert(0, {"type": "image", "image": image, "max_pixels": MAX_PIXELS})
+
+    messages = [{"role": "user", "content": content}]
 
     text_prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
     image_inputs, video_inputs = process_vision_info(messages)
-    inputs = processor(
-        text=[text_prompt],
-        images=image_inputs,
-        videos=video_inputs,
-        return_tensors="pt",
-        padding=True,
-    ).to(model.device)
+    processor_kwargs = {
+        "text": [text_prompt],
+        "return_tensors": "pt",
+        "padding": True,
+    }
+    if image_inputs:
+        processor_kwargs["images"] = image_inputs
+    if video_inputs:
+        processor_kwargs["videos"] = video_inputs
+    inputs = processor(**processor_kwargs).to(model.device)
 
     img_w, img_h = image.size
     image_grid_thw = inputs.get("image_grid_thw")
@@ -289,8 +298,7 @@ def run_inference(
         img_token_start = input_ids_list.index(vision_start_id) + 1
         img_token_end   = input_ids_list.index(vision_end_id)
     except ValueError:
-        img_token_start = 0
-        img_token_end   = grid_h * grid_w
+        img_token_start = img_token_end = 0
     print(f"[debug] tokens in range: {img_token_end - img_token_start}, grid_h*grid_w: {grid_h * grid_w}")
 
     input_len = inputs["input_ids"].shape[1]
@@ -313,6 +321,25 @@ def run_inference(
             "image_token_range": (img_token_start, img_token_end),
         }
 
+    if latent_swap_embeddings is not None:
+        if model_name == "qwen" or not hasattr(model, "latent_swap_embeddings"):
+            store.remove_hooks()
+            raise ValueError(
+                "Latent swap requires Monet or LVR; "
+                "the baseline Qwen model has no generated visual latent tokens."
+            )
+        model.latent_swap_embeddings = [
+            torch.as_tensor(vec, device=model.device, dtype=torch.bfloat16)
+            for vec in latent_swap_embeddings
+        ]
+        if hasattr(model, "latent_swap_config"):
+            model.latent_swap_config = {
+                "strict": bool(strict_latent_swap),
+                "force_latent_start": bool(strict_latent_swap),
+                "prompt_length": input_len,
+                "image_token_range": (img_token_start, img_token_end),
+            }
+
     print(f"[inference] Running generation for {model_name} ...")
     try:
         with torch.no_grad():
@@ -327,6 +354,10 @@ def run_inference(
     finally:
         if attention_intervention and hasattr(model, "latent_attention_intervention"):
             model.latent_attention_intervention = None
+        if latent_swap_embeddings is not None and hasattr(model, "latent_swap_embeddings"):
+            model.latent_swap_embeddings = None
+        if latent_swap_embeddings is not None and hasattr(model, "latent_swap_config"):
+            model.latent_swap_config = None
         store.remove_hooks()
     print(f"[inference] Finished generation for {model_name} ...")
 
@@ -379,6 +410,9 @@ def run_inference(
         "image_grid_hw":  (grid_h, grid_w),
         "image_token_range": (img_token_start, img_token_end),
         "attention_intervention": attention_intervention,
+        "latent_swap_embedding_count": len(latent_swap_embeddings or []),
+        "strict_latent_swap": bool(strict_latent_swap),
+        "omit_image": bool(omit_image),
     }
 
 

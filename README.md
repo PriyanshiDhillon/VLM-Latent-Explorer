@@ -1,8 +1,8 @@
 ## First setup environment
 
 ```bash
-git clone git@github.com:PriyanshiDhillon/VLM-Latent-Explorer.git
-cd ~/VLM-Latent-Explorer
+git clone git@github.com:PriyanshiDhillon/VLM-Latent-Explorer.git VLM-Latent-Explorer-Davide
+cd ~/VLM-Latent-Explorer-Davide
 sbatch environment.sh
 sbatch data/data.sh
 ```
@@ -67,7 +67,7 @@ srun --partition=gpu_a100 --gpus=1 --ntasks=1 --cpus-per-task=9 --time=01:00:00 
 This should allocate you some node (e.g. `gcn54`). Once allocated do:
 
 ```bash
-cd ~/VLM-Latent-Explorer
+cd ~/VLM-Latent-Explorer-Davide
 module load 2025
 module load Anaconda3/2025.06-1
 source /sw/arch/RHEL9/EB_production/2025/software/Anaconda3/2025.06-1/etc/profile.d/conda.sh
@@ -75,13 +75,22 @@ conda activate vlm-latent
 python app.py
 ```
 
+Monet and LVR use recurrent continuous hidden-state decoding automatically.
+Monet generates 10 latent positions per span by default; override this with
+`MONET_LATENT_SIZE`. LVR predicts its own end marker and uses
+`LVR_MAX_LATENT_STEPS=64` as a safety limit.
+
+After changing either latent decoder, regenerate the Monet and LVR caches with
+`--overwrite`, then rerun `experiment/fit_umap.py`. The fitted projection uses
+PCA followed by UMAP so live instances can be transformed without loading the
+legacy ~1 GB UMAP artifacts.
+
 
 ## If browser doesn't work
 Within Windows PowerShell (locally) run. Replace `scur0239` with your own scur and `gcn54` with the allocated node:
 
 ```bash
-ssh -L 9000:127.0.0.1:9000 -J scur0265@snellius.surf.nl scur0265@gcn40
+ssh -L 9001:127.0.0.1:9001 -J scur0265@snellius.surf.nl scur0265@gcn40
 ```
 
 Now it should show if you open it in browser on: `localhost:8050`
-

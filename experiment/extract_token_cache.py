@@ -227,6 +227,10 @@ def classify_tokens(tokenizer, token_ids, prompt_len):
     }
     vision_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
     vision_end_id = tokenizer.convert_tokens_to_ids("<|vision_end|>")
+    monet_latent_start_id = tokenizer.convert_tokens_to_ids("<abs_vis_token>")
+    monet_latent_end_id = tokenizer.convert_tokens_to_ids("</abs_vis_token>")
+    lvr_latent_start_id = tokenizer.convert_tokens_to_ids("<|lvr_start|>")
+    lvr_latent_end_id = tokenizer.convert_tokens_to_ids("<|lvr_latent_end|>")
 
     in_vision = False
     in_latent = False
@@ -243,13 +247,16 @@ def classify_tokens(tokenizer, token_ids, prompt_len):
             in_vision = False
         elif in_vision or token_id in vision_ids:
             token_type = "visual"
+        elif token_id in (monet_latent_start_id, lvr_latent_start_id):
+            in_latent = True
+            token_type = "latent"
+        elif token_id in (monet_latent_end_id, lvr_latent_end_id):
+            token_type = "latent"
+            in_latent = False
         elif any(marker in token_str for marker in LATENT_MARKERS):
-            in_latent = "<abs_vis_token>" in token_str or "<|latent|>" in token_str
             token_type = "latent"
         elif in_latent and source == "generated":
             token_type = "latent"
-            if "</abs_vis_token>" in token_str:
-                in_latent = False
         else:
             token_type = "text"
 

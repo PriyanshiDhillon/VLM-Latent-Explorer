@@ -13,5 +13,5 @@ module load Anaconda3/2025.06-1
 
 source activate vlm-latent
 
-cd $HOME/VLM-Latent-Explorer/experiment
+cd "$HOME/VLM-Latent-Explorer-Davide/experiment"
 python fit_umap.py
