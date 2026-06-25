@@ -32,6 +32,10 @@ EXPERIMENT_OPTIONS = [
         "label": "Image mask",
         "value": "image_mask",
     },
+    {
+        "label": "Latent swap",
+        "value": "latent_swap",
+    },
 ]
 
 
@@ -103,11 +107,6 @@ def experiment_control_panel() -> html.Div:
                 inputClassName="experiment-radio-input",
                 labelClassName="experiment-radio-label",
             ),
-            html.Div(
-                "Latent bottleneck lets answer text read question tokens, generated latent tokens, "
-                "and previous answer tokens, but blocks direct image-patch access.",
-                className="experiment-note",
-            ),
         ],
     )
 
@@ -166,8 +165,54 @@ def input_panel() -> html.Div:
                             "scrollZoom": False,
                             "displaylogo": False,
                         },
-                        style={"height": "160px"},
+                        className="mask-image-graph",
                         figure=_BLANK_FIGURE,
+                    ),
+                ],
+            ),
+            html.Div(
+                id="latent-swap-panel",
+                className="latent-swap-panel",
+                style={"display": "none"},
+                children=[
+                    html.Div("Source image for swapped latents", className="input-label input-label-muted"),
+                    html.Div(
+                        "The model generates visual latents from this source image, then injects them while answering for the main image.",
+                        className="experiment-note",
+                    ),
+                    dcc.Upload(
+                        id="swap-source-image-upload",
+                        children=html.Div(["Drag & Drop source image or ", html.A("select file", className="upload-link")]),
+                        className="upload-box mb-2",
+                    ),
+                    html.Img(
+                        id="swap-source-image-preview",
+                        className="preview-img mb-2",
+                        style={"display": "none"},
+                    ),
+                    html.Div("Source question", className="input-label input-label-muted"),
+                    dbc.Textarea(
+                        id="swap-source-question-input",
+                        placeholder="Leave empty to reuse the main question...",
+                        rows=2,
+                        className="question-input",
+                    ),
+                    dcc.Checklist(
+                        id="swap-bottleneck-checkbox",
+                        options=[
+                            {
+                                "label": "Enable Latent Bottleneck Masking",
+                                "value": "enabled",
+                            }
+                        ],
+                        value=["enabled"],
+                        className="swap-bottleneck-check",
+                        inputClassName="swap-bottleneck-input",
+                        labelClassName="swap-bottleneck-label",
+                    ),
+                    html.Div(
+                        "When enabled, the target image is removed from target generation; answer text receives only the question, source-derived latents, and answer history.",
+                        className="experiment-note swap-bottleneck-note",
                     ),
                 ],
             ),
@@ -677,10 +722,42 @@ def build_layout() -> html.Div:
                     dashboard_page(),
                 ],
             ),
+            html.Div(
+                id="experiment-success-popup",
+                className="experiment-success-popup",
+                children=[
+                    html.Button(
+                        "×",
+                        id="experiment-success-close",
+                        className="experiment-success-close",
+                        n_clicks=0,
+                        **{"aria-label": "Close success popup"},
+                    ),
+                    html.Div("Experiment ready", className="experiment-success-title"),
+                    html.Div(
+                        id="experiment-success-message",
+                        className="experiment-success-message",
+                    ),
+                    html.A(
+                        "Open dashboard →",
+                        href="#dashboard-page",
+                        className="experiment-success-link",
+                    ),
+                ],
+            ),
+            dcc.Interval(
+                id="experiment-success-timeout",
+                interval=4200,
+                n_intervals=0,
+                disabled=True,
+                max_intervals=1,
+            ),
+            dcc.Store(id="store-experiment-success", data=None),
             dcc.Store(id="store-instances", data={}),
             dcc.Store(id="store-active-instance", data=None),
             dcc.Store(id="store-corpus-embeddings", data={}),
             dcc.Store(id="store-current-image-b64", data=None),
+            dcc.Store(id="store-swap-source-image-b64", data=None),
             dcc.Store(id="store-active-projection", data="umap"),
             dcc.Store(id="store-umap-base", data=None),
             dcc.Store(id="store-mask-region", data=None),
