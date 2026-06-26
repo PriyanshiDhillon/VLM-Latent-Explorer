@@ -87,10 +87,10 @@ legacy ~1 GB UMAP artifacts.
 
 
 ## If browser doesn't work
-Within Windows PowerShell (locally) run. Replace `scur0239` with your own scur and `gcn54` with the allocated node:
+Within Windows PowerShell (locally) run. Replace `scur0239` with your own scur and `gcn40` with the allocated node:
 
 ```bash
 ssh -L 9001:127.0.0.1:9001 -J scur0265@snellius.surf.nl scur0265@gcn40
 ```
 
-Now it should show if you open it in browser on: `localhost:8050`
+Now it should show if you open it in browser on: `localhost:9001`
